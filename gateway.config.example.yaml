@@ -1,0 +1,20 @@
+default_model: glm-5.1
+
+models:
+  - name: glm-5.1
+    upstream_model: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: ERNIE_ACCESSCODE
+    owned_by: beacon
+
+  - name: coder-alias
+    upstream_model: provider-internal-coder
+    base_url: https://provider-b.example/v1
+    api_key_env: CODER_API_KEY
+    owned_by: custom-provider
+
+  - name: claude-sonnet-4-5
+    upstream_model: provider-compatible-sonnet
+    base_url: https://provider-b.example/v1
+    api_key_env: CODER_API_KEY
+    owned_by: anthropic-compatible

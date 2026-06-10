@@ -1,0 +1,8 @@
+.DS_Store
+node_modules
+dist
+.env
+gateway.config.yaml
+gateway.yaml
+coverage
+*.log
