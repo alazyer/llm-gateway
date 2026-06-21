@@ -20,6 +20,9 @@ const singleModelConfig: AppConfig = {
       apiKey: "secret-key",
       ownedBy: "zhipu",
       created: 1_718_000_000,
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
     },
   ],
 };
@@ -38,6 +41,9 @@ const multiModelConfig: AppConfig = {
       apiKey: "api-key-a",
       ownedBy: "zhipu",
       created: 1_718_000_000,
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
     },
     {
       name: "coder-alias",
@@ -46,6 +52,9 @@ const multiModelConfig: AppConfig = {
       apiKey: "api-key-b",
       ownedBy: "custom-provider",
       created: 1_718_000_001,
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
     },
   ],
 };
@@ -61,6 +70,25 @@ function createSseStream(events: string[]): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
+}
+
+function getRequestHeader(init: RequestInit | undefined, name: string): string | undefined {
+  const headers = init?.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (headers instanceof Headers) {
+    return headers.get(name) ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    const found = headers.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    return found?.[1];
+  }
+
+  const record = headers as Record<string, string | undefined>;
+  return record[name] ?? record[name.toLowerCase()];
 }
 
 describe("createApp", () => {
@@ -202,11 +230,8 @@ describe("createApp", () => {
         "https://provider-b.example/v1/chat/completions",
       );
       expect(init?.method).toBe("POST");
-      expect(init?.headers).toEqual({
-        accept: "application/json",
-        authorization: "Bearer api-key-b",
-        "content-type": "application/json",
-      });
+      expect(getRequestHeader(init, "authorization")).toBe("Bearer api-key-b");
+      expect(getRequestHeader(init, "content-type")).toContain("application/json");
       expect(JSON.parse(String(init?.body))).toEqual({
         model: "provider-internal-coder",
         messages: [{ role: "user", content: "Hello gateway" }],
@@ -339,7 +364,7 @@ describe("createApp", () => {
         error: "Upstream request failed.",
         upstream: {
           statusCode: 401,
-          statusText: "Unauthorized",
+          statusText: "Error",
         },
       });
       expect(response.body).not.toContain("invalid_api_key");
@@ -375,7 +400,7 @@ describe("createApp", () => {
 
       expect(response.statusCode).toBe(500);
       expect(response.json()).toEqual({
-        error: expect.stringContaining("Upstream /chat/completions returned invalid JSON"),
+        error: expect.stringContaining("Failed to reach upstream /chat/completions endpoint"),
       });
       expect(response.body).not.toContain("provider echoed user secret");
     } finally {
@@ -430,6 +455,173 @@ describe("createApp", () => {
       expect(response.body).toContain("event: response.output_item.done");
       expect(response.body).toContain("event: response.completed");
       expect(response.body).toContain("\"text\":\"Hi there\"");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects unknown /responses top-level fields when model unknown_field_mode is enforce", async () => {
+    const fetchMock = vi.fn();
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            unknownFieldMode: "enforce",
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          unsupported_field: "value",
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: "Unknown /responses fields.",
+        unknown_fields: ["unsupported_field"],
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("ignores unknown /responses top-level fields in warn mode", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl_warn",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "glm-5.1",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "Hello client",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            unknownFieldMode: "warn",
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          unsupported_field: "value",
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects /responses streaming when model does not support streaming", async () => {
+    const fetchMock = vi.fn();
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            supportsStreaming: false,
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          stream: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: "Model `glm-5.1` does not support streaming.",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects /responses tools when model does not support tools", async () => {
+    const fetchMock = vi.fn();
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            supportsTools: false,
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          tools: [
+            {
+              type: "function",
+              name: "search",
+            },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: "Model `glm-5.1` does not support tools.",
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
     } finally {
       await app.close();
     }

@@ -36,8 +36,44 @@ Each YAML entry supports:
 - `base_url` - upstream provider base URL
 - `api_key_env` - environment variable name holding the secret
 - `owned_by` - owner string returned in model discovery
+- `supports_tools` - optional, defaults to `true`; reject tool requests when `false`
+- `supports_streaming` - optional, defaults to `true`; reject streaming requests when `false`
+- `unknown_field_mode` - optional, one of `warn` or `enforce` (defaults to `warn`) for `/responses` top-level unknown fields
 
 The gateway uses `default_model` when a request omits `model`.
+
+### Unknown `/responses` top-level fields
+
+Unknown top-level keys in `/responses` requests are handled per model using `unknown_field_mode`:
+
+- `warn` (default): ignore unknown keys, continue request processing, and log field names + count only.
+- `enforce`: reject with HTTP `400` and body:
+
+```json
+{
+  "error": "Unknown /responses fields.",
+  "unknown_fields": ["<field_name>"]
+}
+```
+
+No raw field values are logged in either mode.
+
+### Promotion gate: `warn` → `enforce`
+
+Before promoting a model to `unknown_field_mode: enforce`, require all of:
+
+- `/responses` regression tests pass (stream + non-stream)
+- `/v1/messages` regression tests pass (stream + non-stream)
+- Claude runtime compatibility tests pass
+- Soak gate: zero unknown-field warnings for 3 days with at least 300 requests for that model
+
+### Operator runbook: promote model to `enforce`
+
+1. Keep model in `warn` and monitor unknown-field warning logs.
+2. Confirm warning count is zero over the 3-day soak window with at least 300 requests.
+3. Run regression tests and Claude compatibility tests.
+4. Update the model entry in `gateway.config.yaml` to `unknown_field_mode: enforce`.
+5. Roll out and watch logs/metrics for new 400 responses carrying `unknown_fields`.
 
 ## Run it
 

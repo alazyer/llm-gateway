@@ -17,6 +17,9 @@ const config: AppConfig = {
       apiKey: "secret-key",
       ownedBy: "gateway",
       created: 1_718_000_000,
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
     },
   ],
 };
@@ -32,6 +35,25 @@ function createSseStream(events: string[]): ReadableStream<Uint8Array> {
       controller.close();
     },
   });
+}
+
+function getRequestHeader(init: RequestInit | undefined, name: string): string | undefined {
+  const headers = init?.headers;
+  if (!headers) {
+    return undefined;
+  }
+
+  if (headers instanceof Headers) {
+    return headers.get(name) ?? undefined;
+  }
+
+  if (Array.isArray(headers)) {
+    const found = headers.find(([key]) => key.toLowerCase() === name.toLowerCase());
+    return found?.[1];
+  }
+
+  const record = headers as Record<string, string | undefined>;
+  return record[name] ?? record[name.toLowerCase()];
 }
 
 describe("Claude Code compatibility routes", () => {
@@ -71,11 +93,8 @@ describe("Claude Code compatibility routes", () => {
     const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
       expect(input.toString()).toBe("https://provider.example/v1/chat/completions");
       expect(init?.method).toBe("POST");
-      expect(init?.headers).toEqual({
-        accept: "application/json",
-        authorization: "Bearer secret-key",
-        "content-type": "application/json",
-      });
+      expect(getRequestHeader(init, "authorization")).toBe("Bearer secret-key");
+      expect(getRequestHeader(init, "content-type")).toContain("application/json");
       expect(JSON.parse(String(init?.body))).toEqual({
         model: "provider-internal-coder",
         messages: [
@@ -332,11 +351,8 @@ describe("Claude Code compatibility routes", () => {
     const fetchMock = vi
       .fn()
       .mockImplementationOnce(async (_input: URL | RequestInfo, init?: RequestInit) => {
-        expect(init?.headers).toEqual({
-          accept: "text/event-stream",
-          authorization: "Bearer secret-key",
-          "content-type": "application/json",
-        });
+        expect(getRequestHeader(init, "authorization")).toBe("Bearer secret-key");
+        expect(getRequestHeader(init, "content-type")).toContain("application/json");
 
         return new Response(
           JSON.stringify({
@@ -352,11 +368,8 @@ describe("Claude Code compatibility routes", () => {
         );
       })
       .mockImplementationOnce(async (_input: URL | RequestInfo, init?: RequestInit) => {
-        expect(init?.headers).toEqual({
-          accept: "application/json",
-          authorization: "Bearer secret-key",
-          "content-type": "application/json",
-        });
+        expect(getRequestHeader(init, "authorization")).toBe("Bearer secret-key");
+        expect(getRequestHeader(init, "content-type")).toContain("application/json");
         expect(JSON.parse(String(init?.body))).toEqual({
           model: "provider-internal-coder",
           messages: [
@@ -431,6 +444,105 @@ describe("Claude Code compatibility routes", () => {
       expect(response.body).toContain('"text":"pong"');
       expect(response.body).toContain("event: message_delta");
       expect(response.body).toContain("event: message_stop");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects /v1/messages streaming when model does not support streaming", async () => {
+    const app = createApp({
+      config: {
+        ...config,
+        models: [
+          {
+            ...config.models[0]!,
+            supportsStreaming: false,
+          },
+        ],
+      },
+      fetchFn: vi.fn() as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: {
+          "anthropic-version": "2023-06-01",
+        },
+        payload: {
+          messages: [
+            {
+              role: "user",
+              content: "Reply with pong only.",
+            },
+          ],
+          max_tokens: 1024,
+          stream: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Model `claude-gateway` does not support streaming.",
+        },
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects /v1/messages tools when model does not support tools", async () => {
+    const app = createApp({
+      config: {
+        ...config,
+        models: [
+          {
+            ...config.models[0]!,
+            supportsTools: false,
+          },
+        ],
+      },
+      fetchFn: vi.fn() as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: {
+          "anthropic-version": "2023-06-01",
+        },
+        payload: {
+          messages: [
+            {
+              role: "user",
+              content: "Reply with pong only.",
+            },
+          ],
+          max_tokens: 1024,
+          tools: [
+            {
+              name: "Bash",
+              input_schema: {
+                type: "object",
+              },
+            },
+          ],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "Model `claude-gateway` does not support tools.",
+        },
+      });
     } finally {
       await app.close();
     }

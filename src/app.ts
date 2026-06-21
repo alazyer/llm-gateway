@@ -2,11 +2,11 @@ import Fastify from "fastify";
 
 import type { AppConfig } from "./config.js";
 import { responsesRoutes } from "./routes/responses.js";
-import { ChatCompletionsClient } from "./upstream/chat-completions-client.js";
+import type { ChatCompletionsTransport } from "./upstream/chat-completions-client.js";
 
 export interface CreateAppOptions {
   config: AppConfig;
-  client?: ChatCompletionsClient;
+  client?: ChatCompletionsTransport;
   fetchFn?: typeof fetch;
 }
 
@@ -37,7 +37,7 @@ export function createApp(options: CreateAppOptions) {
 
   const routeOptions: {
     config: AppConfig;
-    client?: ChatCompletionsClient;
+    client?: ChatCompletionsTransport;
     fetchFn?: typeof fetch;
   } = {
     config: options.config,

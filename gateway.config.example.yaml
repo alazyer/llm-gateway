@@ -6,15 +6,24 @@ models:
     base_url: https://provider-a.example/v1
     api_key_env: ERNIE_ACCESSCODE
     owned_by: beacon
+    supports_tools: true
+    supports_streaming: true
+    unknown_field_mode: warn
 
   - name: coder-alias
     upstream_model: provider-internal-coder
     base_url: https://provider-b.example/v1
     api_key_env: CODER_API_KEY
     owned_by: custom-provider
+    supports_tools: true
+    supports_streaming: true
+    unknown_field_mode: warn
 
   - name: claude-sonnet-4-5
     upstream_model: provider-compatible-sonnet
     base_url: https://provider-b.example/v1
     api_key_env: CODER_API_KEY
     owned_by: anthropic-compatible
+    supports_tools: true
+    supports_streaming: true
+    unknown_field_mode: enforce

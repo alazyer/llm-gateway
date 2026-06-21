@@ -49,6 +49,9 @@ models:
           baseUrl: "https://provider-a.example/v1",
           apiKey: "api-key-a",
           ownedBy: "zhipu",
+          supportsTools: true,
+          supportsStreaming: true,
+          unknownFieldMode: "warn",
         },
         {
           name: "coder-alias",
@@ -56,6 +59,9 @@ models:
           baseUrl: "https://provider-b.example/v1",
           apiKey: "api-key-b",
           ownedBy: "custom-provider",
+          supportsTools: true,
+          supportsStreaming: true,
+          unknownFieldMode: "warn",
         },
       ]);
     } finally {
@@ -98,6 +104,35 @@ models:
           GATEWAY_CONFIG_PATH: configPath,
         }),
       ).toThrowError(/Inline api_key values are not supported/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid unknown_field_mode enum values", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+    unknown_field_mode: strict
+`,
+      "utf8",
+    );
+
+    try {
+      expect(() =>
+        loadConfig({
+          HOST: "127.0.0.1",
+          PORT: "4000",
+          GATEWAY_CONFIG_PATH: configPath,
+          GLM_API_KEY: "api-key-a",
+        }),
+      ).toThrowError();
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

@@ -26,6 +26,7 @@ import { translateChatCompletionResponse } from "../translation/response.js";
 import { createChatCompletionStreamTranslator } from "../translation/stream.js";
 import {
   ChatCompletionsClient,
+  type ChatCompletionsTransport,
   UpstreamHttpError,
 } from "../upstream/chat-completions-client.js";
 
@@ -47,6 +48,20 @@ const requestBodySchema = z
   })
   .passthrough();
 
+const RESPONSES_ALLOWED_TOP_LEVEL_FIELDS = new Set([
+  "model",
+  "input",
+  "instructions",
+  "stream",
+  "temperature",
+  "top_p",
+  "max_output_tokens",
+  "metadata",
+  "user",
+  "tools",
+  "tool_choice",
+]);
+
 interface ModelRecord {
   id: string;
   display_name: string;
@@ -60,12 +75,12 @@ interface ModelRecord {
     input_modalities: ["text"];
     output_modalities: ["text"];
     supports_responses_api: true;
-    supports_streaming: true;
+    supports_streaming: boolean;
     supports_system_messages: true;
     supports_model_messages: true;
     supports_personality: true;
-    supports_tool_calls: true;
-    supports_parallel_tool_calls: true;
+    supports_tool_calls: boolean;
+    supports_parallel_tool_calls: boolean;
   };
   personality: "default";
   model_messages: [
@@ -86,7 +101,7 @@ interface AnthropicModelRecord {
 
 interface ResponsesRoutesOptions {
   config: AppConfig;
-  client?: ChatCompletionsClient;
+  client?: ChatCompletionsTransport;
   fetchFn?: typeof fetch;
 }
 
@@ -136,12 +151,12 @@ function createModelRecord(model: GatewayModelConfig): ModelRecord {
       input_modalities: ["text"],
       output_modalities: ["text"],
       supports_responses_api: true,
-      supports_streaming: true,
+      supports_streaming: model.supportsStreaming,
       supports_system_messages: true,
       supports_model_messages: true,
       supports_personality: true,
-      supports_tool_calls: true,
-      supports_parallel_tool_calls: true,
+      supports_tool_calls: model.supportsTools,
+      supports_parallel_tool_calls: model.supportsTools,
     },
     personality: "default",
     model_messages: [
@@ -517,14 +532,63 @@ function sendAnthropicError(
   });
 }
 
+function listUnknownResponsesTopLevelFields(body: unknown): string[] {
+  if (!isRecord(body)) {
+    return [];
+  }
+
+  return Object.keys(body)
+    .filter((field) => !RESPONSES_ALLOWED_TOP_LEVEL_FIELDS.has(field))
+    .sort();
+}
+
+function responseRequestUsesTools(request: ParsedResponseRequest): boolean {
+  if (Array.isArray(request.tools) && request.tools.length > 0) {
+    return true;
+  }
+
+  if (request.tool_choice === undefined) {
+    return false;
+  }
+
+  return request.tool_choice !== "none";
+}
+
+function anthropicRequestUsesTools(request: ParsedAnthropicMessagesRequest): boolean {
+  if (Array.isArray(request.tools) && request.tools.length > 0) {
+    return true;
+  }
+
+  if (request.tool_choice === undefined) {
+    return false;
+  }
+
+  if (typeof request.tool_choice === "string") {
+    return request.tool_choice !== "none";
+  }
+
+  return true;
+}
+
 export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async (
   app,
   options,
 ) => {
   const log = app.log.child({ component: "responses-routes" });
-  const clientCache = new Map<string, ChatCompletionsClient>();
+  const clientCache = new Map<string, ChatCompletionsTransport>();
+  const unknownFieldCounters = new Map<string, { warn: number; enforce: number }>();
 
-  const getClient = (model: GatewayModelConfig): ChatCompletionsClient => {
+  const incrementUnknownFieldCounter = (
+    publicModel: string,
+    mode: "warn" | "enforce",
+  ): number => {
+    const existing = unknownFieldCounters.get(publicModel) ?? { warn: 0, enforce: 0 };
+    existing[mode] += 1;
+    unknownFieldCounters.set(publicModel, existing);
+    return existing[mode];
+  };
+
+  const getClient = (model: GatewayModelConfig): ChatCompletionsTransport => {
     if (options.client) {
       return options.client;
     }
@@ -603,6 +667,50 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         "Handling /responses request.",
       );
       const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const supportsStreaming = selectedModel.supportsStreaming;
+      const supportsTools = selectedModel.supportsTools;
+      const unknownFieldMode = selectedModel.unknownFieldMode;
+      const unknownTopLevelFields = listUnknownResponsesTopLevelFields(request.body);
+
+      if (unknownTopLevelFields.length > 0) {
+        const unknownFieldModeCount = incrementUnknownFieldCounter(
+          selectedModel.name,
+          unknownFieldMode,
+        );
+
+        log.warn(
+          {
+            requestId: request.id,
+            publicModel: selectedModel.name,
+            unknownFieldMode,
+            unknownFields: unknownTopLevelFields,
+            unknownFieldCount: unknownTopLevelFields.length,
+            unknownFieldModeCount,
+          },
+          "Detected unknown top-level /responses request fields.",
+        );
+
+        if (unknownFieldMode === "enforce") {
+          throw new RouteError(400, "Unknown /responses fields.", {
+            unknown_fields: unknownTopLevelFields,
+          });
+        }
+      }
+
+      if (parsedRequest.stream && !supportsStreaming) {
+        throw new RouteError(
+          400,
+          `Model \`${selectedModel.name}\` does not support streaming.`,
+        );
+      }
+
+      if (responseRequestUsesTools(parsedRequest) && !supportsTools) {
+        throw new RouteError(
+          400,
+          `Model \`${selectedModel.name}\` does not support tools.`,
+        );
+      }
+
       log.debug(
         {
           requestId: request.id,
@@ -630,13 +738,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           },
           "Proxying streaming response request upstream.",
         );
-        const upstreamResponse = await client.createCompletionStream(upstreamRequest);
-        if (!upstreamResponse.body) {
-          throw new RouteError(
-            502,
-            "Upstream stream response did not include a readable body.",
-          );
-        }
+        const upstreamStream = await client.createCompletionStream(upstreamRequest);
 
         reply
           .code(200)
@@ -646,7 +748,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           .header("x-accel-buffering", "no");
 
         return reply.send(
-          Readable.from(translateStream(upstreamResponse.body, translationOptions)),
+          Readable.from(translateStream(upstreamStream, translationOptions)),
         );
       }
 
@@ -682,6 +784,23 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         "Handling /v1/messages request.",
       );
       const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const supportsStreaming = selectedModel.supportsStreaming;
+      const supportsTools = selectedModel.supportsTools;
+
+      if (parsedRequest.stream && !supportsStreaming) {
+        throw new RouteError(
+          400,
+          `Model \`${selectedModel.name}\` does not support streaming.`,
+        );
+      }
+
+      if (anthropicRequestUsesTools(parsedRequest) && !supportsTools) {
+        throw new RouteError(
+          400,
+          `Model \`${selectedModel.name}\` does not support tools.`,
+        );
+      }
+
       log.debug(
         {
           requestId: request.id,
@@ -717,13 +836,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         );
 
         try {
-          const upstreamResponse = await client.createCompletionStream(upstreamRequest);
-          if (!upstreamResponse.body) {
-            throw new RouteError(
-              502,
-              "Upstream stream response did not include a readable body.",
-            );
-          }
+          const upstreamStream = await client.createCompletionStream(upstreamRequest);
 
           reply
             .code(200)
@@ -734,7 +847,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
 
           return reply.send(
             Readable.from(
-              translateAnthropicStream(upstreamResponse.body, selectedModel.name),
+              translateAnthropicStream(upstreamStream, selectedModel.name),
             ),
           );
         } catch (error) {

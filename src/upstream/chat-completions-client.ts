@@ -1,4 +1,5 @@
 import type { ChatCompletionRequest, ChatCompletionResponse } from "../contracts.js";
+import OpenAI, { APIError } from "openai";
 
 interface LoggerLike {
   debug(context: unknown, message?: string): void;
@@ -12,6 +13,11 @@ export interface ChatCompletionsClientOptions {
   apiKey: string;
   fetchFn?: typeof fetch;
   logger?: LoggerLike;
+}
+
+export interface ChatCompletionsTransport {
+  createCompletion(request: ChatCompletionRequest): Promise<ChatCompletionResponse>;
+  createCompletionStream(request: ChatCompletionRequest): Promise<ReadableStream<Uint8Array>>;
 }
 
 export class UpstreamHttpError extends Error {
@@ -28,113 +34,118 @@ export class UpstreamHttpError extends Error {
   }
 }
 
-export class ChatCompletionsClient {
-  private readonly baseUrl: string;
-  private readonly apiKey: string;
-  private readonly fetchFn: typeof fetch;
+export class ChatCompletionsClient implements ChatCompletionsTransport {
+  private readonly client: OpenAI;
   private readonly logger: LoggerLike | undefined;
 
   public constructor(options: ChatCompletionsClientOptions) {
-    this.baseUrl = ensureTrailingSlash(options.baseUrl);
-    this.apiKey = options.apiKey;
-    this.fetchFn = options.fetchFn ?? fetch;
+    const baseUrl = ensureTrailingSlash(options.baseUrl);
+    this.client = new OpenAI({
+      baseURL: baseUrl,
+      apiKey: options.apiKey,
+      fetch: options.fetchFn,
+    });
     this.logger = options.logger;
   }
 
   public async createCompletion(
     request: ChatCompletionRequest,
   ): Promise<ChatCompletionResponse> {
-    const response = await this.postChatCompletion(request, "application/json");
-    const rawBody = await response.text();
-
     try {
-      return JSON.parse(rawBody) as ChatCompletionResponse;
-    } catch (error) {
-      throw new Error(
-        `Upstream /chat/completions returned invalid JSON: ${toErrorMessage(error)}`,
+      const response = await this.client.chat.completions.create(
+        request as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
       );
+
+      return response as unknown as ChatCompletionResponse;
+    } catch (error) {
+      throw this.toUpstreamError(error, request, false);
     }
   }
 
   public async createCompletionStream(
     request: ChatCompletionRequest,
-  ): Promise<Response> {
-    const response = await this.postChatCompletion(request, "text/event-stream");
-
-    if (!response.body) {
-      throw new Error("Upstream /chat/completions response did not include a readable stream.");
-    }
-
-    return response;
-  }
-
-  private async postChatCompletion(
-    request: ChatCompletionRequest,
-    accept: string,
-  ): Promise<Response> {
-    const url = new URL("chat/completions", this.baseUrl);
-    const logContext = {
-      upstreamUrl: url.toString(),
-      model: request.model,
-      stream: accept === "text/event-stream",
+  ): Promise<ReadableStream<Uint8Array>> {
+    const streamingRequest: ChatCompletionRequest = {
+      ...request,
+      stream: true,
     };
 
-    this.logger?.info(logContext, "Calling upstream /chat/completions.");
+    this.logger?.info(
+      {
+        model: request.model,
+        stream: true,
+      },
+      "Calling upstream /chat/completions via OpenAI SDK.",
+    );
 
-    let response: Response;
     try {
-      response = await this.fetchFn(url, {
-        method: "POST",
-        headers: {
-          accept,
-          authorization: `Bearer ${this.apiKey}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(request),
-      });
-    } catch (error) {
-      this.logger?.error(
-        {
-          ...logContext,
-          error: toErrorMessage(error),
-        },
-        "Failed to reach upstream /chat/completions.",
+      const stream = await this.client.chat.completions.create(
+        streamingRequest as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
       );
-      throw new Error(
-        `Failed to reach upstream /chat/completions endpoint at ${url.toString()}: ${toErrorMessage(
-          error,
-        )}`,
-      );
-    }
 
-    if (!response.ok) {
-      const body = await response.text();
+      return createSseReadableStream(stream as AsyncIterable<unknown>);
+    } catch (error) {
+      throw this.toUpstreamError(error, request, true);
+    }
+  }
+
+  private toUpstreamError(
+    error: unknown,
+    request: ChatCompletionRequest,
+    stream: boolean,
+  ): Error {
+    if (error instanceof APIError) {
       this.logger?.warn(
         {
-          ...logContext,
-          statusCode: response.status,
-          statusText: response.statusText,
+          model: request.model,
+          stream,
+          statusCode: error.status,
+          statusText: error.name,
         },
         "Upstream /chat/completions returned a non-success response.",
       );
-      throw new UpstreamHttpError(
-        response.status,
-        response.statusText,
-        body,
+
+      return new UpstreamHttpError(
+        error.status ?? 502,
+        error.name,
+        JSON.stringify(error.error ?? { message: error.message }),
       );
     }
 
-    this.logger?.debug(
+    this.logger?.error(
       {
-        ...logContext,
-        statusCode: response.status,
-        statusText: response.statusText,
+        model: request.model,
+        stream,
+        error: toErrorMessage(error),
       },
-      "Upstream /chat/completions request succeeded.",
+      "Failed to reach upstream /chat/completions.",
     );
 
-    return response;
+    return new Error(
+      `Failed to reach upstream /chat/completions endpoint: ${toErrorMessage(error)}`,
+    );
   }
+}
+
+function createSseReadableStream(
+  stream: AsyncIterable<unknown>,
+): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      try {
+        for await (const chunk of stream) {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`));
+        }
+
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+    },
+  });
 }
 
 function ensureTrailingSlash(url: string): string {

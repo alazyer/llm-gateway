@@ -25,6 +25,9 @@ const yamlModelSchema = z
     api_key_env: z.string().trim().min(1).optional(),
     owned_by: z.string().trim().min(1).default("llm-gateway"),
     created: z.number().int().nonnegative().optional(),
+    supports_tools: z.boolean().default(true),
+    supports_streaming: z.boolean().default(true),
+    unknown_field_mode: z.enum(["warn", "enforce"]).default("warn"),
   })
   .superRefine((value, ctx) => {
     if (value.api_key) {
@@ -56,6 +59,9 @@ export interface GatewayModelConfig {
   apiKey: string;
   ownedBy: string;
   created: number;
+  supportsTools: boolean;
+  supportsStreaming: boolean;
+  unknownFieldMode: "warn" | "enforce";
 }
 
 export interface AppConfig {
@@ -96,6 +102,9 @@ function normalizeModelEntry(
     apiKey,
     ownedBy: value.owned_by,
     created: value.created ?? getCurrentTimestamp(),
+    supportsTools: value.supports_tools,
+    supportsStreaming: value.supports_streaming,
+    unknownFieldMode: value.unknown_field_mode,
   };
 }
 
