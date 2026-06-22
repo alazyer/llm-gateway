@@ -1,10 +1,11 @@
 # llm-gateway
 
-`llm-gateway` is a Fastify gateway that lets clients call `/responses`-style or Anthropic `/v1/messages` APIs while the upstream model provider only supports `/chat/completions`.
+`llm-gateway` is a Fastify gateway that lets clients call `/responses`-style, OpenAI `/v1/chat/completions`, or Anthropic `/v1/messages` APIs while the upstream model provider only supports `/chat/completions`.
 
 ## What it does
 
 - Accepts `POST /responses` and `POST /v1/responses`
+- Accepts `POST /v1/chat/completions` for OpenAI-compatible clients
 - Accepts `POST /v1/messages` for Anthropic-compatible clients such as Claude Code
 - Exposes `GET /models`, `GET /v1/models`, and per-model detail endpoints for metadata discovery
 - Translates `/responses` input into `/chat/completions` messages
@@ -159,6 +160,19 @@ curl http://localhost:3000/v1/responses \
     "model": "glm-5.1",
     "instructions": "Reply in one sentence.",
     "input": "Explain what this gateway does."
+  }'
+```
+
+## Example Chat Completions request
+
+```bash
+curl http://localhost:3000/v1/chat/completions \
+  -H 'content-type: application/json' \
+  -d '{
+    "model": "glm-5.1",
+    "messages": [
+      { "role": "user", "content": "Say hello." }
+    ]
   }'
 ```
 

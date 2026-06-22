@@ -6,3 +6,6 @@ gateway.config.yaml
 gateway.yaml
 coverage
 *.log
+
+
+.worktree

@@ -115,6 +115,9 @@ type ParsedResponseRequest = Omit<ResponseRequest, "model"> & { model?: string }
 type ParsedAnthropicMessagesRequest = Omit<AnthropicMessagesRequest, "model"> & {
   model?: string;
 };
+type ParsedChatCompletionsRequest = Omit<ChatCompletionRequest, "model"> & {
+  model?: string;
+};
 
 class RouteError extends Error {
   public readonly statusCode: number;
@@ -333,6 +336,42 @@ function parseAnthropicMessagesRequest(body: unknown): ParsedAnthropicMessagesRe
   return normalized;
 }
 
+function parseChatCompletionsRequest(body: unknown): ParsedChatCompletionsRequest {
+  if (!isRecord(body)) {
+    throw new RouteError(400, "Request body must be an object.");
+  }
+
+  if (!Array.isArray(body.messages) || body.messages.length === 0) {
+    throw new RouteError(400, "Request body messages must be a non-empty array.");
+  }
+
+  if (body.model !== undefined && typeof body.model !== "string") {
+    throw new RouteError(400, "Request body model must be a string.");
+  }
+
+  if (body.stream !== undefined && typeof body.stream !== "boolean") {
+    throw new RouteError(400, "Request body stream must be a boolean.");
+  }
+
+  if (body.tools !== undefined && !Array.isArray(body.tools)) {
+    throw new RouteError(400, "Request body tools must be an array when provided.");
+  }
+
+  const normalized: ParsedChatCompletionsRequest = {
+    ...(body as Omit<ChatCompletionRequest, "model">),
+    messages: body.messages as ChatCompletionRequest["messages"],
+  };
+
+  const model = normalizeOptionalString(
+    typeof body.model === "string" ? body.model : undefined,
+  );
+  if (model) {
+    normalized.model = model;
+  }
+
+  return normalized;
+}
+
 function buildTranslationOptions(
   request: ParsedResponseRequest,
   publicModel: string,
@@ -532,6 +571,68 @@ function sendAnthropicError(
   });
 }
 
+function sendOpenAiError(
+  reply: FastifyReply,
+  error: unknown,
+  log: FastifyReply["log"],
+  requestId?: string,
+): FastifyReply {
+  reply.type("application/json; charset=utf-8");
+
+  if (error instanceof UpstreamHttpError) {
+    log.warn(
+      {
+        requestId,
+        statusCode: error.statusCode,
+        statusText: error.statusText,
+      },
+      "Upstream API request failed.",
+    );
+
+    return reply.code(error.statusCode).send({
+      error: {
+        message: "Upstream request failed.",
+        type: "api_error",
+      },
+    });
+  }
+
+  if (error instanceof RouteError) {
+    const method = error.statusCode >= 500 ? log.error.bind(log) : log.warn.bind(log);
+    method(
+      {
+        requestId,
+        statusCode: error.statusCode,
+        details: error.details,
+      },
+      error.message,
+    );
+
+    return reply.code(error.statusCode).send({
+      error: {
+        message: error.message,
+        type: error.statusCode >= 500 ? "api_error" : "invalid_request_error",
+      },
+    });
+  }
+
+  const message = toErrorMessage(error);
+  log.error(
+    {
+      requestId,
+      error: message,
+    },
+    "Unhandled gateway error.",
+  );
+
+  return reply.code(500).send({
+    error: {
+      message,
+      type: "api_error",
+    },
+  });
+}
+
 function listUnknownResponsesTopLevelFields(body: unknown): string[] {
   if (!isRecord(body)) {
     return [];
@@ -555,6 +656,24 @@ function responseRequestUsesTools(request: ParsedResponseRequest): boolean {
 }
 
 function anthropicRequestUsesTools(request: ParsedAnthropicMessagesRequest): boolean {
+  if (Array.isArray(request.tools) && request.tools.length > 0) {
+    return true;
+  }
+
+  if (request.tool_choice === undefined) {
+    return false;
+  }
+
+  if (typeof request.tool_choice === "string") {
+    return request.tool_choice !== "none";
+  }
+
+  return true;
+}
+
+function chatCompletionsRequestUsesTools(
+  request: ParsedChatCompletionsRequest,
+): boolean {
   if (Array.isArray(request.tools) && request.tools.length > 0) {
     return true;
   }
@@ -904,6 +1023,85 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     }
   };
 
+  const chatCompletionsHandler = async (
+    request: FastifyRequest<{ Body: unknown }>,
+    reply: FastifyReply,
+  ) => {
+    try {
+      const parsedRequest = parseChatCompletionsRequest(request.body);
+      log.info(
+        {
+          requestId: request.id,
+          path: request.url,
+          stream: parsedRequest.stream ?? false,
+          requestedModel: parsedRequest.model ?? null,
+        },
+        "Handling /v1/chat/completions request.",
+      );
+
+      const selectedModel = resolveModel(options.config, parsedRequest.model);
+
+      if (parsedRequest.stream && !selectedModel.supportsStreaming) {
+        throw new RouteError(
+          400,
+          `Model \`${selectedModel.name}\` does not support streaming.`,
+        );
+      }
+
+      if (chatCompletionsRequestUsesTools(parsedRequest) && !selectedModel.supportsTools) {
+        throw new RouteError(400, `Model \`${selectedModel.name}\` does not support tools.`);
+      }
+
+      log.debug(
+        {
+          requestId: request.id,
+          publicModel: selectedModel.name,
+          upstreamModel: selectedModel.upstreamModel,
+          upstreamBaseUrl: selectedModel.baseUrl,
+        },
+        "Selected upstream target for chat completions request.",
+      );
+
+      const upstreamRequest: ChatCompletionRequest = {
+        ...parsedRequest,
+        model: selectedModel.upstreamModel,
+      };
+      const client = getClient(selectedModel);
+
+      if (parsedRequest.stream) {
+        log.info(
+          {
+            requestId: request.id,
+            publicModel: selectedModel.name,
+          },
+          "Proxying streaming chat completions request upstream.",
+        );
+        const upstreamStream = await client.createCompletionStream(upstreamRequest);
+
+        reply
+          .code(200)
+          .type("text/event-stream; charset=utf-8")
+          .header("cache-control", "no-cache, no-transform")
+          .header("connection", "keep-alive")
+          .header("x-accel-buffering", "no");
+
+        return reply.send(Readable.from(readableStreamToAsyncIterable(upstreamStream)));
+      }
+
+      log.info(
+        {
+          requestId: request.id,
+          publicModel: selectedModel.name,
+        },
+        "Proxying non-stream chat completions request upstream.",
+      );
+      const upstreamResponse = await client.createCompletion(upstreamRequest);
+      return reply.code(200).send(upstreamResponse);
+    } catch (error) {
+      return sendOpenAiError(reply, error, log, request.id);
+    }
+  };
+
   const anthropicCountTokensHandler = async (
     request: FastifyRequest<{ Body: unknown }>,
     reply: FastifyReply,
@@ -947,6 +1145,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
   app.get("/v1/models/:model", modelDetailHandler);
   app.post("/responses", responsesHandler);
   app.post("/v1/responses", responsesHandler);
+  app.post("/v1/chat/completions", chatCompletionsHandler);
   app.post("/v1/messages", anthropicMessagesHandler);
   app.post("/v1/messages/count_tokens", anthropicCountTokensHandler);
 };

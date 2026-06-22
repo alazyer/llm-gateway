@@ -626,4 +626,223 @@ describe("createApp", () => {
       await app.close();
     }
   });
+
+  it("proxies non-stream /v1/chat/completions requests using configured model routing", async () => {
+    const fetchMock = vi.fn(async (input: URL | RequestInfo, init?: RequestInit) => {
+      expect(input.toString()).toBe(
+        "https://provider-b.example/v1/chat/completions",
+      );
+      expect(init?.method).toBe("POST");
+      expect(getRequestHeader(init, "authorization")).toBe("Bearer api-key-b");
+      expect(JSON.parse(String(init?.body))).toEqual({
+        model: "provider-internal-coder",
+        messages: [{ role: "user", content: "Hello gateway" }],
+      });
+
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl_direct",
+          object: "chat.completion",
+          created: 1_718_000_010,
+          model: "provider-internal-coder",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "Hello from direct chat completions",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      );
+    });
+
+    const app = createApp({
+      config: multiModelConfig,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          model: "coder-alias",
+          messages: [{ role: "user", content: "Hello gateway" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response.json()).toMatchObject({
+        id: "chatcmpl_direct",
+        object: "chat.completion",
+        model: "provider-internal-coder",
+        choices: [
+          {
+            index: 0,
+            finish_reason: "stop",
+            message: {
+              role: "assistant",
+              content: "Hello from direct chat completions",
+            },
+          },
+        ],
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("streams OpenAI-compatible SSE for /v1/chat/completions", async () => {
+    const fetchMock = vi.fn(async () => {
+      const body = createSseStream([
+        'data: {"id":"chatcmpl_direct_stream","object":"chat.completion.chunk","created":1718000000,"model":"glm-5.1","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+
+      return new Response(body, {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+        },
+      });
+    });
+
+    const app = createApp({
+      config: singleModelConfig,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          messages: [{ role: "user", content: "Hello gateway" }],
+          stream: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.body).toContain("chat.completion.chunk");
+      expect(response.body).toContain("data: [DONE]");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects /v1/chat/completions when model is not configured", async () => {
+    const fetchMock = vi.fn();
+    const app = createApp({
+      config: multiModelConfig,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          model: "unknown-model",
+          messages: [{ role: "user", content: "Hello gateway" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          message: "Model metadata for `unknown-model` is not configured.",
+          type: "invalid_request_error",
+        },
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns OpenAI-style validation error for invalid /v1/chat/completions payload", async () => {
+    const fetchMock = vi.fn();
+    const app = createApp({
+      config: singleModelConfig,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          model: "glm-5.1",
+        },
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        error: {
+          message: "Request body messages must be a non-empty array.",
+          type: "invalid_request_error",
+        },
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("maps upstream failures to OpenAI-style errors for /v1/chat/completions", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          error: "invalid_api_key",
+          detail: "provider echoed a sensitive prompt fragment",
+        }),
+        {
+          status: 401,
+          statusText: "Unauthorized",
+          headers: {
+            "content-type": "application/json",
+          },
+        },
+      ),
+    );
+
+    const app = createApp({
+      config: singleModelConfig,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/chat/completions",
+        payload: {
+          messages: [{ role: "user", content: "Hello gateway" }],
+        },
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toEqual({
+        error: {
+          message: "Upstream request failed.",
+          type: "api_error",
+        },
+      });
+      expect(response.body).not.toContain("invalid_api_key");
+      expect(response.body).not.toContain("sensitive prompt fragment");
+    } finally {
+      await app.close();
+    }
+  });
 });

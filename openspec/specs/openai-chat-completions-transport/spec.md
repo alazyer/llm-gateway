@@ -35,3 +35,7 @@ The gateway SHALL map OpenAI SDK transport and upstream HTTP failures into stabl
 #### Scenario: Upstream transport error on `/v1/messages`
 - **WHEN** SDK transport fails while serving `/v1/messages`
 - **THEN** the gateway SHALL return an Anthropic-compatible error envelope with appropriate HTTP status
+
+#### Scenario: Upstream transport error on `/v1/chat/completions`
+- **WHEN** SDK transport fails while serving `/v1/chat/completions`
+- **THEN** the gateway SHALL return an OpenAI-compatible Chat Completions error envelope with appropriate HTTP status
