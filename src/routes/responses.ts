@@ -395,10 +395,11 @@ function buildTranslationOptions(
 async function* translateStream(
   upstreamStream: ReadableStream<Uint8Array>,
   options: TranslationOptions,
+  abortSignal?: AbortSignal,
 ): AsyncGenerator<string> {
   const translator = createChatCompletionStreamTranslator(options);
 
-  for await (const chunk of readableStreamToAsyncIterable(upstreamStream)) {
+  for await (const chunk of readableStreamToAsyncIterable(upstreamStream, abortSignal)) {
     for (const frame of translator.push(chunk)) {
       yield frame;
     }
@@ -413,12 +414,13 @@ async function* translateStream(
 async function* translateAnthropicStream(
   upstreamStream: ReadableStream<Uint8Array>,
   publicModel: string,
+  abortSignal?: AbortSignal,
 ): AsyncGenerator<string> {
   const translator = createAnthropicMessageStreamTranslator({
     model: publicModel,
   });
 
-  for await (const chunk of readableStreamToAsyncIterable(upstreamStream)) {
+  for await (const chunk of readableStreamToAsyncIterable(upstreamStream, abortSignal)) {
     for (const frame of translator.push(chunk)) {
       yield frame;
     }
@@ -429,13 +431,27 @@ async function* translateAnthropicStream(
   }
 }
 
+function createDisconnectAbortSignal(request: FastifyRequest): AbortSignal {
+  const abortController = new AbortController();
+  const onClose = () => {
+    abortController.abort();
+  };
+  request.raw.on("close", onClose);
+  return abortController.signal;
+}
+
 async function* readableStreamToAsyncIterable(
   stream: ReadableStream<Uint8Array>,
+  abortSignal?: AbortSignal,
 ): AsyncGenerator<Uint8Array> {
   const reader = stream.getReader();
 
   try {
     while (true) {
+      if (abortSignal?.aborted) {
+        return;
+      }
+
       const { done, value } = await reader.read();
       if (done) {
         return;
@@ -696,13 +712,22 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
 ) => {
   const log = app.log.child({ component: "responses-routes" });
   const clientCache = new Map<string, ChatCompletionsTransport>();
-  const unknownFieldCounters = new Map<string, { warn: number; enforce: number }>();
+  const unknownFieldCounters = new Map<string, { warn: number; enforce: number; requestCount: number; windowRequests: number }>();
 
   const incrementUnknownFieldCounter = (
     publicModel: string,
     mode: "warn" | "enforce",
+    windowRequests: number,
   ): number => {
-    const existing = unknownFieldCounters.get(publicModel) ?? { warn: 0, enforce: 0 };
+    const existing = unknownFieldCounters.get(publicModel) ?? { warn: 0, enforce: 0, requestCount: 0, windowRequests };
+    existing.requestCount += 1;
+
+    if (existing.requestCount >= existing.windowRequests) {
+      existing.warn = 0;
+      existing.enforce = 0;
+      existing.requestCount = 0;
+    }
+
     existing[mode] += 1;
     unknownFieldCounters.set(publicModel, existing);
     return existing[mode];
@@ -729,6 +754,8 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         warn(context: unknown, message?: string): void;
         error(context: unknown, message?: string): void;
       };
+      timeoutMs?: number;
+      maxRetries?: number;
     } = {
       baseUrl: model.baseUrl,
       apiKey: model.apiKey,
@@ -736,6 +763,8 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         component: "upstream-client",
         upstreamBaseUrl: model.baseUrl,
       }),
+      timeoutMs: options.config.requestTimeoutMs,
+      maxRetries: options.config.maxRetries,
     };
     if (options.fetchFn) {
       clientOptions.fetchFn = options.fetchFn;
@@ -796,6 +825,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         const unknownFieldModeCount = incrementUnknownFieldCounter(
           selectedModel.name,
           unknownFieldMode,
+          selectedModel.unknownFieldWindowRequests,
         );
 
         log.warn(
@@ -858,7 +888,8 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           },
           "Proxying streaming response request upstream.",
         );
-        const upstreamStream = await client.createCompletionStream(upstreamRequest);
+        const upstreamStream = await client.createCompletionStream(upstreamRequest, request.id);
+        const disconnectSignal = createDisconnectAbortSignal(request);
 
         reply
           .code(200)
@@ -868,7 +899,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           .header("x-accel-buffering", "no");
 
         return reply.send(
-          Readable.from(translateStream(upstreamStream, translationOptions)),
+          Readable.from(translateStream(upstreamStream, translationOptions, disconnectSignal)),
         );
       }
 
@@ -879,7 +910,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Proxying non-stream response request upstream.",
       );
-      const upstreamResponse = await client.createCompletion(upstreamRequest);
+      const upstreamResponse = await client.createCompletion(upstreamRequest, request.id);
       return reply.code(200).send(
         translateChatCompletionResponse(upstreamResponse, translationOptions),
       );
@@ -956,7 +987,8 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         );
 
         try {
-          const upstreamStream = await client.createCompletionStream(upstreamRequest);
+          const upstreamStream = await client.createCompletionStream(upstreamRequest, request.id);
+          const disconnectSignal = createDisconnectAbortSignal(request);
 
           reply
             .code(200)
@@ -967,7 +999,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
 
           return reply.send(
             Readable.from(
-              translateAnthropicStream(upstreamStream, selectedModel.name),
+              translateAnthropicStream(upstreamStream, selectedModel.name, disconnectSignal),
             ),
           );
         } catch (error) {
@@ -985,7 +1017,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           );
 
           const { stream: _stream, ...nonStreamingUpstreamRequest } = upstreamRequest;
-          const upstreamResponse = await client.createCompletion(nonStreamingUpstreamRequest);
+          const upstreamResponse = await client.createCompletion(nonStreamingUpstreamRequest, request.id);
           const anthropicResponse = translateChatCompletionResponseToAnthropic(
             upstreamResponse,
             {
@@ -1013,7 +1045,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Proxying non-stream Anthropic request upstream.",
       );
-      const upstreamResponse = await client.createCompletion(upstreamRequest);
+      const upstreamResponse = await client.createCompletion(upstreamRequest, request.id);
       return reply.code(200).send(
         translateChatCompletionResponseToAnthropic(upstreamResponse, {
           model: selectedModel.name,
@@ -1077,7 +1109,8 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           },
           "Proxying streaming chat completions request upstream.",
         );
-        const upstreamStream = await client.createCompletionStream(upstreamRequest);
+        const upstreamStream = await client.createCompletionStream(upstreamRequest, request.id);
+        const disconnectSignal = createDisconnectAbortSignal(request);
 
         reply
           .code(200)
@@ -1086,7 +1119,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
           .header("connection", "keep-alive")
           .header("x-accel-buffering", "no");
 
-        return reply.send(Readable.from(readableStreamToAsyncIterable(upstreamStream)));
+        return reply.send(Readable.from(readableStreamToAsyncIterable(upstreamStream, disconnectSignal)));
       }
 
       log.info(
@@ -1096,7 +1129,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Proxying non-stream chat completions request upstream.",
       );
-      const upstreamResponse = await client.createCompletion(upstreamRequest);
+      const upstreamResponse = await client.createCompletion(upstreamRequest, request.id);
       return reply.code(200).send(upstreamResponse);
     } catch (error) {
       return sendOpenAiError(reply, error, log, request.id);
