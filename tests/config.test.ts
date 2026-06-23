@@ -137,4 +137,238 @@ models:
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("loads gateway_auth_token_env and resolves the token from env", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+gateway_auth_token_env: GATEWAY_AUTH_TOKEN
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+        GATEWAY_AUTH_TOKEN: "my-secret-token",
+      });
+
+      expect(config.gatewayAuthToken).toBe("my-secret-token");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("skips gatewayAuthToken when the env var is empty or missing", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+gateway_auth_token_env: GATEWAY_AUTH_TOKEN
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+        // GATEWAY_AUTH_TOKEN is intentionally omitted
+      });
+
+      expect(config.gatewayAuthToken).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads health_probe_enabled from YAML with default of false", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.healthProbeEnabled).toBe(false);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads health_probe_enabled: true from YAML", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `health_probe_enabled: true
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.healthProbeEnabled).toBe(true);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads cors_origin as a single string", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `cors_origin: http://localhost:5173
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.corsOrigin).toBe("http://localhost:5173");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads cors_origin as an array of strings", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `cors_origin:
+  - http://localhost:5173
+  - https://admin.example.com
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.corsOrigin).toEqual(["http://localhost:5173", "https://admin.example.com"]);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads cors_origin as wildcard string", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `cors_origin: "*"
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.corsOrigin).toBe("*");
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not set corsOrigin when not configured", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.corsOrigin).toBeUndefined();
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

@@ -12,6 +12,10 @@ const singleModelConfig: AppConfig = {
   logLevel: "silent",
   upstreamBaseUrl: "https://provider.example/v1",
   defaultModel: "glm-5.1",
+  requestTimeoutMs: 30000,
+  maxRetries: 0,
+  maxBodySizeKb: 1024,
+  healthProbeEnabled: false,
   models: [
     {
       name: "glm-5.1",
@@ -23,6 +27,7 @@ const singleModelConfig: AppConfig = {
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
+      unknownFieldWindowRequests: 100,
     },
   ],
 };
@@ -33,6 +38,10 @@ const multiModelConfig: AppConfig = {
   logLevel: "silent",
   upstreamBaseUrl: "https://provider-a.example/v1",
   defaultModel: "glm-5.1",
+  requestTimeoutMs: 30000,
+  maxRetries: 0,
+  maxBodySizeKb: 1024,
+  healthProbeEnabled: false,
   models: [
     {
       name: "glm-5.1",
@@ -44,6 +53,7 @@ const multiModelConfig: AppConfig = {
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
+      unknownFieldWindowRequests: 100,
     },
     {
       name: "coder-alias",
@@ -55,6 +65,7 @@ const multiModelConfig: AppConfig = {
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
+      unknownFieldWindowRequests: 100,
     },
   ],
 };
@@ -105,7 +116,7 @@ describe("createApp", () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ok: true });
+      expect(response.json()).toEqual({ ok: true, models: 2 });
     } finally {
       await app.close();
     }

@@ -9,6 +9,9 @@ const config: AppConfig = {
   logLevel: "silent",
   upstreamBaseUrl: "https://provider.example/v1",
   defaultModel: "claude-gateway",
+  requestTimeoutMs: 30000,
+  maxRetries: 0,
+  maxBodySizeKb: 1024,
   models: [
     {
       name: "claude-gateway",
@@ -20,6 +23,7 @@ const config: AppConfig = {
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
+      unknownFieldWindowRequests: 100,
     },
   ],
 };
