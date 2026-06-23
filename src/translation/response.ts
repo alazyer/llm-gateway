@@ -4,6 +4,7 @@ import type {
   ChatCompletionUsage,
   ChatToolCall,
 } from "../contracts.js";
+import { isRecord, expectString, expectNumber } from "../shared.js";
 
 export interface ResponseTranslationOptions {
   temperature?: number;
@@ -60,26 +61,6 @@ export interface ResponsesStyleResponse {
   top_p?: number;
   usage?: ResponsesUsage;
   error?: ResponsesError;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-export function expectString(value: unknown, context: string): string {
-  if (typeof value !== "string") {
-    throw new Error(`${context} must be a string.`);
-  }
-
-  return value;
-}
-
-export function expectNumber(value: unknown, context: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    throw new Error(`${context} must be a number.`);
-  }
-
-  return value;
 }
 
 export function normalizeSamplingOptions(

@@ -29,6 +29,7 @@ import {
   type ChatCompletionsTransport,
   UpstreamHttpError,
 } from "../upstream/chat-completions-client.js";
+import { isRecord, toErrorMessage } from "../shared.js";
 
 const metadataValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
@@ -1292,16 +1293,4 @@ function isResponseRole(value: unknown): value is ResponseMessageItem["role"] {
     value === "system" ||
     value === "developer"
   );
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-function toErrorMessage(error: unknown): string {
-  if (error instanceof Error) {
-    return error.message;
-  }
-
-  return String(error);
 }

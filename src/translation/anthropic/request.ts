@@ -11,34 +11,7 @@ import type {
   ChatToolChoice,
   ChatToolCall,
 } from "../../contracts.js";
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function expectString(value: unknown, context: string): string {
-  if (typeof value !== "string") {
-    throw new Error(`${context} must be a string.`);
-  }
-
-  return value;
-}
-
-function expectNumber(value: unknown, context: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    throw new Error(`${context} must be a number.`);
-  }
-
-  return value;
-}
-
-function expectBoolean(value: unknown, context: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new Error(`${context} must be a boolean.`);
-  }
-
-  return value;
-}
+import { isRecord, expectString, expectNumber, expectBoolean } from "../../shared.js";
 
 function normalizeTextBlock(value: unknown, context: string): AnthropicTextBlock {
   if (!isRecord(value)) {

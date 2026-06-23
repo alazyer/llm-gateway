@@ -14,6 +14,7 @@ import type {
   ResponsesTool,
   ResponsesToolChoice,
 } from "../contracts.js";
+import { isRecord, expectString, expectNumber, expectBoolean } from "../shared.js";
 
 const SUPPORTED_ROLES = new Set<ResponseRole>([
   "user",
@@ -25,34 +26,6 @@ const SUPPORTED_CONTENT_TYPES = new Set<ResponseTextContent["type"]>([
   "input_text",
   "output_text",
 ]);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function expectString(value: unknown, context: string): string {
-  if (typeof value !== "string") {
-    throw new Error(`${context} must be a string.`);
-  }
-
-  return value;
-}
-
-function expectNumber(value: unknown, context: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    throw new Error(`${context} must be a number.`);
-  }
-
-  return value;
-}
-
-function expectBoolean(value: unknown, context: string): boolean {
-  if (typeof value !== "boolean") {
-    throw new Error(`${context} must be a boolean.`);
-  }
-
-  return value;
-}
 
 function normalizeRole(role: unknown, context: string): ChatMessage["role"] {
   const value = expectString(role, context);

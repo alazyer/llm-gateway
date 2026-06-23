@@ -6,8 +6,6 @@ import type {
 import {
   buildResponseFunctionCall,
   buildResponseOutputMessage,
-  expectNumber,
-  expectString,
   normalizeSamplingOptions,
   translateChatCompletionUsage,
   type ResponseTranslationOptions,
@@ -17,6 +15,7 @@ import {
   type ResponsesStyleResponse,
   type ResponsesUsage,
 } from "./response.js";
+import { isRecord, expectString, expectNumber, formatSseEvent, extractDataFrame } from "../shared.js";
 
 interface ChatCompletionStreamChunk {
   id?: string;
@@ -129,25 +128,6 @@ interface ToolCallState {
   itemAdded: boolean;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function formatSseEvent(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function extractDataFrame(frame: string): string | null {
-  const dataLines: string[] = [];
-
-  for (const line of frame.split("\n")) {
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-
-  return dataLines.length > 0 ? dataLines.join("\n") : null;
-}
 
 function normalizeChunkContent(
   choices: ChatCompletionChoice[],

@@ -7,6 +7,7 @@ import type {
   ChatCompletionUsage,
 } from "../../contracts.js";
 import { mapChatFinishReasonToAnthropic } from "./response.js";
+import { isRecord, expectString, expectNumber, formatSseEvent, extractDataFrame } from "../../shared.js";
 
 interface AnthropicStreamTranslationOptions {
   model?: string;
@@ -29,42 +30,6 @@ interface ToolCallState {
   id: string;
   name: string;
   inputText: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function expectString(value: unknown, context: string): string {
-  if (typeof value !== "string") {
-    throw new Error(`${context} must be a string.`);
-  }
-
-  return value;
-}
-
-function expectNumber(value: unknown, context: string): number {
-  if (typeof value !== "number" || Number.isNaN(value)) {
-    throw new Error(`${context} must be a number.`);
-  }
-
-  return value;
-}
-
-function formatSseEvent(event: string, data: unknown): string {
-  return `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
-}
-
-function extractDataFrame(frame: string): string | null {
-  const dataLines: string[] = [];
-
-  for (const line of frame.split("\n")) {
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trimStart());
-    }
-  }
-
-  return dataLines.length > 0 ? dataLines.join("\n") : null;
 }
 
 function getFirstChoice(choices: ChatCompletionChoice[], context: string): ChatCompletionChoice {
