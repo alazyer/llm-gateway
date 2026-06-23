@@ -1,5 +1,28 @@
 default_model: glm-5.1
 
+# Upstream request timeout in milliseconds (default: 30000).
+request_timeout_ms: 30000
+
+# Maximum retry attempts on transient failures (429, 502, 503). Default: 0 (no retry).
+max_retries: 0
+
+# Maximum request body size in kilobytes (default: 1024 = 1MB).
+max_body_size_kb: 1024
+
+# Gateway auth token env var reference. When set, incoming requests must include
+# a matching x-api-key or Authorization: Bearer header. Disabled by default.
+# gateway_auth_token_env: GATEWAY_AUTH_TOKEN
+
+# Enable upstream connectivity probing in /healthz (default: false).
+# health_probe_enabled: false
+
+# CORS origin for browser-based clients. Accepts a single origin string,
+# "*" for wildcard, or an array of origin strings. Disabled by default.
+# cors_origin: http://localhost:5173
+# cors_origin:
+#   - http://localhost:5173
+#   - https://admin.example.com
+
 models:
   - name: glm-5.1
     upstream_model: glm-5.1
@@ -9,6 +32,8 @@ models:
     supports_tools: true
     supports_streaming: true
     unknown_field_mode: warn
+    # Number of requests before unknown-field counter resets (default: 100).
+    unknown_field_window_requests: 100
 
   - name: coder-alias
     upstream_model: provider-internal-coder
@@ -18,6 +43,7 @@ models:
     supports_tools: true
     supports_streaming: true
     unknown_field_mode: warn
+    unknown_field_window_requests: 100
 
   - name: claude-sonnet-4-5
     upstream_model: provider-compatible-sonnet
@@ -27,3 +53,4 @@ models:
     supports_tools: true
     supports_streaming: true
     unknown_field_mode: enforce
+    unknown_field_window_requests: 100

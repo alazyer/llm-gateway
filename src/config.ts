@@ -28,6 +28,7 @@ const yamlModelSchema = z
     supports_tools: z.boolean().default(true),
     supports_streaming: z.boolean().default(true),
     unknown_field_mode: z.enum(["warn", "enforce"]).default("warn"),
+    unknown_field_window_requests: z.coerce.number().int().positive().default(100),
   })
   .superRefine((value, ctx) => {
     if (value.api_key) {
@@ -49,6 +50,12 @@ const yamlModelSchema = z
 
 const yamlGatewaySchema = z.object({
   default_model: z.string().trim().min(1).optional(),
+  request_timeout_ms: z.coerce.number().int().positive().default(30000),
+  max_retries: z.coerce.number().int().nonnegative().default(0),
+  max_body_size_kb: z.coerce.number().int().positive().default(1024),
+  gateway_auth_token_env: z.string().trim().min(1).optional(),
+  health_probe_enabled: z.boolean().default(false),
+  cors_origin: z.union([z.string(), z.array(z.string())]).optional(),
   models: z.array(yamlModelSchema).min(1),
 });
 
@@ -62,6 +69,7 @@ export interface GatewayModelConfig {
   supportsTools: boolean;
   supportsStreaming: boolean;
   unknownFieldMode: "warn" | "enforce";
+  unknownFieldWindowRequests: number;
 }
 
 export interface AppConfig {
@@ -70,6 +78,12 @@ export interface AppConfig {
   logLevel: "trace" | "debug" | "info" | "warn" | "error" | "fatal" | "silent";
   upstreamBaseUrl: string;
   defaultModel?: string;
+  requestTimeoutMs: number;
+  maxRetries: number;
+  maxBodySizeKb: number;
+  gatewayAuthToken?: string;
+  healthProbeEnabled: boolean;
+  corsOrigin?: string | string[];
   models: GatewayModelConfig[];
 }
 
@@ -105,13 +119,14 @@ function normalizeModelEntry(
     supportsTools: value.supports_tools,
     supportsStreaming: value.supports_streaming,
     unknownFieldMode: value.unknown_field_mode,
+    unknownFieldWindowRequests: value.unknown_field_window_requests,
   };
 }
 
 function loadYamlConfig(
   configPath: string,
   env: NodeJS.ProcessEnv,
-): { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string } {
+): { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[] } {
   let rawContent: string;
   try {
     rawContent = readFileSync(resolve(configPath), "utf8");
@@ -144,10 +159,25 @@ function loadYamlConfig(
     );
   }
 
-  const config: { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string } = {
+  const config: { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[] } = {
     models,
     upstreamBaseUrl: models[0]!.baseUrl,
+    requestTimeoutMs: parsed.request_timeout_ms,
+    maxRetries: parsed.max_retries,
+    maxBodySizeKb: parsed.max_body_size_kb,
+    healthProbeEnabled: parsed.health_probe_enabled,
   };
+
+  if (parsed.gateway_auth_token_env) {
+    const token = env[parsed.gateway_auth_token_env];
+    if (token) {
+      config.gatewayAuthToken = token;
+    }
+  }
+
+  if (parsed.cors_origin) {
+    config.corsOrigin = parsed.cors_origin;
+  }
 
   if (defaultModel) {
     config.defaultModel = defaultModel;
@@ -165,11 +195,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
     upstreamBaseUrl: configSource.upstreamBaseUrl,
+    requestTimeoutMs: configSource.requestTimeoutMs,
+    maxRetries: configSource.maxRetries,
+    maxBodySizeKb: configSource.maxBodySizeKb,
+    healthProbeEnabled: configSource.healthProbeEnabled,
     models: configSource.models,
   };
 
   if (configSource.defaultModel) {
     config.defaultModel = configSource.defaultModel;
+  }
+
+  if (configSource.gatewayAuthToken) {
+    config.gatewayAuthToken = configSource.gatewayAuthToken;
+  }
+
+  if (configSource.corsOrigin) {
+    config.corsOrigin = configSource.corsOrigin;
   }
 
   return config;
