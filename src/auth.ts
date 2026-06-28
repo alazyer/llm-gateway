@@ -4,6 +4,7 @@ const SKIP_AUTH_URLS = new Set([
   "/healthz",
   "/models",
   "/v1/models",
+  "/ws/copilot-proxy",
 ]);
 
 function isAuthSkippedPath(url: string): boolean {

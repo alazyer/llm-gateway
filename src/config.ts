@@ -56,6 +56,11 @@ const yamlGatewaySchema = z.object({
   gateway_auth_token_env: z.string().trim().min(1).optional(),
   health_probe_enabled: z.boolean().default(false),
   cors_origin: z.union([z.string(), z.array(z.string())]).optional(),
+  copilot_proxy_enabled: z.boolean().default(false),
+  copilot_proxy_token_ttl_seconds: z.coerce.number().int().positive().default(86400),
+  copilot_proxy_heartbeat_interval_ms: z.coerce.number().int().positive().default(30000),
+  copilot_proxy_heartbeat_timeout_ms: z.coerce.number().int().positive().default(10000),
+  copilot_proxy_max_inflight_per_connection: z.coerce.number().int().positive().default(4),
   models: z.array(yamlModelSchema).min(1),
 });
 
@@ -84,8 +89,25 @@ export interface AppConfig {
   gatewayAuthToken?: string;
   healthProbeEnabled: boolean;
   corsOrigin?: string | string[];
+  copilotProxy?: CopilotProxyConfig;
   models: GatewayModelConfig[];
 }
+
+export interface CopilotProxyConfig {
+  enabled: boolean;
+  tokenTtlSeconds: number;
+  heartbeatIntervalMs: number;
+  heartbeatTimeoutMs: number;
+  maxInflightPerConnection: number;
+}
+
+export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
+  enabled: false,
+  tokenTtlSeconds: 86400,
+  heartbeatIntervalMs: 30000,
+  heartbeatTimeoutMs: 10000,
+  maxInflightPerConnection: 4,
+};
 
 type YamlModelConfig = z.infer<typeof yamlModelSchema>;
 
@@ -126,7 +148,7 @@ function normalizeModelEntry(
 function loadYamlConfig(
   configPath: string,
   env: NodeJS.ProcessEnv,
-): { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[] } {
+): { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } {
   let rawContent: string;
   try {
     rawContent = readFileSync(resolve(configPath), "utf8");
@@ -159,13 +181,20 @@ function loadYamlConfig(
     );
   }
 
-  const config: { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[] } = {
+  const config: { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } = {
     models,
     upstreamBaseUrl: models[0]!.baseUrl,
     requestTimeoutMs: parsed.request_timeout_ms,
     maxRetries: parsed.max_retries,
     maxBodySizeKb: parsed.max_body_size_kb,
     healthProbeEnabled: parsed.health_probe_enabled,
+    copilotProxy: {
+      enabled: parsed.copilot_proxy_enabled,
+      tokenTtlSeconds: parsed.copilot_proxy_token_ttl_seconds,
+      heartbeatIntervalMs: parsed.copilot_proxy_heartbeat_interval_ms,
+      heartbeatTimeoutMs: parsed.copilot_proxy_heartbeat_timeout_ms,
+      maxInflightPerConnection: parsed.copilot_proxy_max_inflight_per_connection,
+    },
   };
 
   if (parsed.gateway_auth_token_env) {
@@ -199,6 +228,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     maxRetries: configSource.maxRetries,
     maxBodySizeKb: configSource.maxBodySizeKb,
     healthProbeEnabled: configSource.healthProbeEnabled,
+    copilotProxy: configSource.copilotProxy,
     models: configSource.models,
   };
 

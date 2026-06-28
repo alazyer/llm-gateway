@@ -2,9 +2,13 @@
   "name": "llm-gateway",
   "version": "0.1.0",
   "description": "Gateway that translates /responses and /v1/messages requests to /chat/completions upstream providers.",
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
     "test": "vitest run",
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run build --workspace @llm-gateway/shared && npm run build:gateway && npm run build --workspace llm-gateway-copilot-proxy",
+    "build:gateway": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
     "test:watch": "vitest"
@@ -16,6 +20,8 @@
   "private": true,
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
+    "@fastify/websocket": "^11.2.0",
+    "@llm-gateway/shared": "file:packages/shared",
     "dotenv": "^17.4.2",
     "fastify": "^5.8.5",
     "openai": "^6.42.0",
@@ -24,6 +30,8 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.2",
+    "@types/vscode": "^1.125.0",
+    "@types/ws": "^8.18.1",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vitest": "^4.1.8"

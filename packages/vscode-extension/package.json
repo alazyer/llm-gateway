@@ -1,0 +1,76 @@
+{
+  "name": "llm-gateway-copilot-proxy",
+  "displayName": "LLM Gateway Copilot Proxy",
+  "version": "0.1.0",
+  "description": "VS Code extension that connects GitHub Copilot language models to llm-gateway.",
+  "type": "module",
+  "private": true,
+  "publisher": "llm-gateway",
+  "main": "./dist/extension.js",
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.js.map",
+    "package.json"
+  ],
+  "engines": {
+    "vscode": "^1.101.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:llmGatewayCopilotProxy.reconnect",
+    "onCommand:llmGatewayCopilotProxy.showOutput"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "llmGatewayCopilotProxy.reconnect",
+        "title": "LLM Gateway Copilot Proxy: Reconnect"
+      },
+      {
+        "command": "llmGatewayCopilotProxy.showOutput",
+        "title": "LLM Gateway Copilot Proxy: Show Output"
+      }
+    ],
+    "configuration": {
+      "title": "LLM Gateway Copilot Proxy",
+      "properties": {
+        "llmGatewayCopilotProxy.gatewayUrl": {
+          "type": "string",
+          "default": "ws://localhost:3000/ws/copilot-proxy",
+          "description": "Gateway WebSocket URL for Copilot proxy connections."
+        },
+        "llmGatewayCopilotProxy.proxyToken": {
+          "type": "string",
+          "default": "",
+          "description": "Scoped Copilot proxy token issued by llm-gateway."
+        },
+        "llmGatewayCopilotProxy.reconnectInitialDelayMs": {
+          "type": "number",
+          "default": 1000,
+          "minimum": 100,
+          "description": "Initial reconnect delay in milliseconds."
+        },
+        "llmGatewayCopilotProxy.reconnectMaxDelayMs": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "description": "Maximum reconnect delay in milliseconds."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "rm -rf dist tsconfig.tsbuildinfo && tsc -p tsconfig.json",
+    "test": "vitest run",
+    "package": "npm run build && vsce package --no-dependencies --allow-missing-repository --out dist/llm-gateway-copilot-proxy-0.1.0.vsix"
+  },
+  "dependencies": {
+    "@llm-gateway/shared": "file:../shared"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.0"
+  }
+}

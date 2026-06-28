@@ -23,6 +23,14 @@ max_body_size_kb: 1024
 #   - http://localhost:5173
 #   - https://admin.example.com
 
+# Copilot proxy settings for VS Code extension connections. Disabled by default.
+# Requires gateway_auth_token_env to issue scoped extension proxy tokens.
+# copilot_proxy_enabled: false
+# copilot_proxy_token_ttl_seconds: 86400
+# copilot_proxy_heartbeat_interval_ms: 30000
+# copilot_proxy_heartbeat_timeout_ms: 10000
+# copilot_proxy_max_inflight_per_connection: 4
+
 models:
   - name: glm-5.1
     upstream_model: glm-5.1

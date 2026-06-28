@@ -371,4 +371,77 @@ models:
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  it("loads Copilot proxy config with disabled defaults", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.copilotProxy).toEqual({
+        enabled: false,
+        tokenTtlSeconds: 86400,
+        heartbeatIntervalMs: 30000,
+        heartbeatTimeoutMs: 10000,
+        maxInflightPerConnection: 4,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads custom Copilot proxy config", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `copilot_proxy_enabled: true
+copilot_proxy_token_ttl_seconds: 120
+copilot_proxy_heartbeat_interval_ms: 5000
+copilot_proxy_heartbeat_timeout_ms: 2000
+copilot_proxy_max_inflight_per_connection: 2
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.copilotProxy).toEqual({
+        enabled: true,
+        tokenTtlSeconds: 120,
+        heartbeatIntervalMs: 5000,
+        heartbeatTimeoutMs: 2000,
+        maxInflightPerConnection: 2,
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 });

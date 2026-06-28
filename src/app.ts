@@ -1,7 +1,15 @@
 import Fastify from "fastify";
+import websocket from "@fastify/websocket";
 
-import type { AppConfig } from "./config.js";
+import {
+  DEFAULT_COPILOT_PROXY_CONFIG,
+  type AppConfig,
+  type CopilotProxyConfig,
+} from "./config.js";
 import { registerAuthHook } from "./auth.js";
+import { CopilotProxyTokenStore } from "./copilot-proxy/auth.js";
+import { CopilotProxyConnectionRegistry } from "./copilot-proxy/registry.js";
+import { registerCopilotProxyWebsocket } from "./copilot-proxy/server.js";
 import { registerCorsHook } from "./cors.js";
 import { responsesRoutes } from "./routes/responses.js";
 import type { ChatCompletionsTransport } from "./upstream/chat-completions-client.js";
@@ -12,7 +20,16 @@ export interface CreateAppOptions {
   fetchFn?: typeof fetch;
 }
 
+function getCopilotProxyConfig(config: AppConfig): CopilotProxyConfig {
+  return config.copilotProxy ?? DEFAULT_COPILOT_PROXY_CONFIG;
+}
+
 export function createApp(options: CreateAppOptions) {
+  const copilotProxyConfig = getCopilotProxyConfig(options.config);
+  const copilotProxyTokenStore = new CopilotProxyTokenStore({
+    tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
+  });
+  const copilotProxyRegistry = new CopilotProxyConnectionRegistry();
   const app = Fastify({
     bodyLimit: options.config.maxBodySizeKb * 1024,
     logger: {
@@ -83,12 +100,51 @@ export function createApp(options: CreateAppOptions) {
     return healthResponse;
   });
 
+  app.post("/api/proxy-token", async (_request, reply) => {
+    if (!copilotProxyConfig.enabled) {
+      return reply.code(403).send({
+        error: {
+          message: "Copilot proxy is disabled.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    if (!options.config.gatewayAuthToken) {
+      return reply.code(403).send({
+        error: {
+          message: "Gateway auth must be enabled to issue Copilot proxy tokens.",
+          type: "authentication_error",
+        },
+      });
+    }
+
+    return reply.code(201).send(copilotProxyTokenStore.issueToken());
+  });
+
+  if (copilotProxyConfig.enabled) {
+    void app.register(websocket);
+    app.after((error) => {
+      if (error) {
+        throw error;
+      }
+
+      registerCopilotProxyWebsocket(app, {
+        config: copilotProxyConfig,
+        registry: copilotProxyRegistry,
+        tokenStore: copilotProxyTokenStore,
+      });
+    });
+  }
+
   const routeOptions: {
     config: AppConfig;
     client?: ChatCompletionsTransport;
     fetchFn?: typeof fetch;
+    copilotProxyRegistry?: CopilotProxyConnectionRegistry;
   } = {
     config: options.config,
+    copilotProxyRegistry,
   };
 
   if (options.client) {
