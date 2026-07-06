@@ -57,6 +57,7 @@ const yamlGatewaySchema = z.object({
   health_probe_enabled: z.boolean().default(false),
   cors_origin: z.union([z.string(), z.array(z.string())]).optional(),
   copilot_proxy_enabled: z.boolean().default(false),
+  copilot_proxy_require_token_auth: z.boolean().default(true),
   copilot_proxy_token_ttl_seconds: z.coerce.number().int().positive().default(86400),
   copilot_proxy_heartbeat_interval_ms: z.coerce.number().int().positive().default(30000),
   copilot_proxy_heartbeat_timeout_ms: z.coerce.number().int().positive().default(10000),
@@ -95,6 +96,7 @@ export interface AppConfig {
 
 export interface CopilotProxyConfig {
   enabled: boolean;
+  requireTokenAuth: boolean;
   tokenTtlSeconds: number;
   heartbeatIntervalMs: number;
   heartbeatTimeoutMs: number;
@@ -103,6 +105,7 @@ export interface CopilotProxyConfig {
 
 export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
   enabled: false,
+  requireTokenAuth: true,
   tokenTtlSeconds: 86400,
   heartbeatIntervalMs: 30000,
   heartbeatTimeoutMs: 10000,
@@ -190,6 +193,7 @@ function loadYamlConfig(
     healthProbeEnabled: parsed.health_probe_enabled,
     copilotProxy: {
       enabled: parsed.copilot_proxy_enabled,
+      requireTokenAuth: parsed.copilot_proxy_require_token_auth,
       tokenTtlSeconds: parsed.copilot_proxy_token_ttl_seconds,
       heartbeatIntervalMs: parsed.copilot_proxy_heartbeat_interval_ms,
       heartbeatTimeoutMs: parsed.copilot_proxy_heartbeat_timeout_ms,

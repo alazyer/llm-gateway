@@ -136,11 +136,17 @@ export function registerCopilotProxyWebsocket(
   options: RegisterCopilotProxyWebsocketOptions,
 ): void {
   app.get("/ws/copilot-proxy", { websocket: true }, (socket, request) => {
-    const token = extractProxyTokenFromUrl(request.url);
-    if (!options.tokenStore.validateToken(token)) {
-      request.log.warn("Rejected unauthorized Copilot proxy WebSocket connection.");
-      socket.close(1008, "Unauthorized Copilot proxy token.");
-      return;
+    if (options.config.requireTokenAuth) {
+      const token = extractProxyTokenFromUrl(request.url);
+      if (!options.tokenStore.validateToken(token)) {
+        request.log.warn("Rejected unauthorized Copilot proxy WebSocket connection.");
+        socket.close(1008, "Unauthorized Copilot proxy token.");
+        return;
+      }
+    } else {
+      request.log.warn(
+        "Accepted Copilot proxy WebSocket connection without token auth because copilot_proxy_require_token_auth=false.",
+      );
     }
 
     const connectionId = randomUUID();

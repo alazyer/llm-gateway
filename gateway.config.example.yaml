@@ -26,6 +26,9 @@ max_body_size_kb: 1024
 # Copilot proxy settings for VS Code extension connections. Disabled by default.
 # Requires gateway_auth_token_env to issue scoped extension proxy tokens.
 # copilot_proxy_enabled: false
+# Optional, defaults to true. When false, /ws/copilot-proxy accepts
+# extension connections without a token query param.
+# copilot_proxy_require_token_auth: true
 # copilot_proxy_token_ttl_seconds: 86400
 # copilot_proxy_heartbeat_interval_ms: 30000
 # copilot_proxy_heartbeat_timeout_ms: 10000

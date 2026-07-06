@@ -35,6 +35,7 @@ const config: AppConfig = {
   healthProbeEnabled: false,
   copilotProxy: {
     enabled: true,
+    requireTokenAuth: true,
     tokenTtlSeconds: 60,
     heartbeatIntervalMs: 20,
     heartbeatTimeoutMs: 100,
@@ -142,6 +143,31 @@ describe("Copilot proxy WebSocket", () => {
       const closeCode = await waitForClose(ws);
 
       expect(closeCode).toBe(1008);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts WebSocket connections without token when token auth is disabled", async () => {
+    const app = createApp({
+      config: {
+        ...config,
+        copilotProxy: {
+          ...config.copilotProxy!,
+          requireTokenAuth: false,
+        },
+      },
+    });
+
+    try {
+      await app.ready();
+      const ws = await app.injectWS("/ws/copilot-proxy");
+
+      const message = await waitForMessage(ws);
+      expect(message).toEqual({ type: "ping" });
+
+      ws.send(JSON.stringify({ type: "pong" }));
+      ws.close();
     } finally {
       await app.close();
     }

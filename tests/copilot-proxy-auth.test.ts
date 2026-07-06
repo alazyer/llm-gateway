@@ -19,6 +19,7 @@ const baseConfig: AppConfig = {
   healthProbeEnabled: false,
   copilotProxy: {
     enabled: true,
+    requireTokenAuth: true,
     tokenTtlSeconds: 60,
     heartbeatIntervalMs: 30000,
     heartbeatTimeoutMs: 10000,

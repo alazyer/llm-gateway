@@ -396,6 +396,7 @@ models:
 
       expect(config.copilotProxy).toEqual({
         enabled: false,
+        requireTokenAuth: true,
         tokenTtlSeconds: 86400,
         heartbeatIntervalMs: 30000,
         heartbeatTimeoutMs: 10000,
@@ -413,6 +414,7 @@ models:
     writeFileSync(
       configPath,
       `copilot_proxy_enabled: true
+copilot_proxy_require_token_auth: false
 copilot_proxy_token_ttl_seconds: 120
 copilot_proxy_heartbeat_interval_ms: 5000
 copilot_proxy_heartbeat_timeout_ms: 2000
@@ -435,6 +437,7 @@ models:
 
       expect(config.copilotProxy).toEqual({
         enabled: true,
+        requireTokenAuth: false,
         tokenTtlSeconds: 120,
         heartbeatIntervalMs: 5000,
         heartbeatTimeoutMs: 2000,

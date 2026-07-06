@@ -43,6 +43,7 @@ Top-level YAML settings:
 - `health_probe_enabled` - optional, defaults to `false`; probes upstream `/models` during `/healthz`
 - `cors_origin` - optional browser CORS allowlist: `"*"`, a single origin string, or an array of origin strings
 - `copilot_proxy_enabled` - optional, defaults to `false`; enables scoped proxy-token issuance for the VS Code Copilot proxy extension
+- `copilot_proxy_require_token_auth` - optional, defaults to `true`; requires a scoped proxy token on `/ws/copilot-proxy` connections
 - `copilot_proxy_token_ttl_seconds` - optional proxy-token lifetime, defaults to `86400`
 - `copilot_proxy_heartbeat_interval_ms` - optional WebSocket heartbeat interval, defaults to `30000`
 - `copilot_proxy_heartbeat_timeout_ms` - optional WebSocket heartbeat timeout, defaults to `10000`
@@ -95,7 +96,9 @@ VS Code extension
 GitHub Copilot in VS Code
 ```
 
-When `copilot_proxy_enabled: true` and gateway auth is enabled, `POST /api/proxy-token` issues a scoped, expiring token for VS Code extension WebSocket connections. The endpoint requires the same gateway auth token as data routes. Proxy tokens are only valid for Copilot proxy extension connections and do not grant access to HTTP data endpoints.
+When `copilot_proxy_enabled: true` and `copilot_proxy_require_token_auth: true` (default), `POST /api/proxy-token` issues a scoped, expiring token for VS Code extension WebSocket connections. The endpoint requires the same gateway auth token as data routes. Proxy tokens are only valid for Copilot proxy extension connections and do not grant access to HTTP data endpoints.
+
+If `copilot_proxy_require_token_auth: false`, the gateway accepts `/ws/copilot-proxy` connections without proxy tokens. Use this only in trusted local/dev environments.
 
 Copilot authentication remains managed entirely by VS Code and the GitHub Copilot extension. Do not export Copilot or VS Code credentials into gateway configuration, `.env`, logs, or proxy-token requests.
 
@@ -106,6 +109,7 @@ Copilot authentication remains managed entirely by VS Code and the GitHub Copilo
 ```yaml
 gateway_auth_token_env: GATEWAY_AUTH_TOKEN
 copilot_proxy_enabled: true
+copilot_proxy_require_token_auth: true
 copilot_proxy_token_ttl_seconds: 86400
 copilot_proxy_heartbeat_interval_ms: 30000
 copilot_proxy_heartbeat_timeout_ms: 10000
@@ -148,12 +152,12 @@ code --install-extension packages/vscode-extension/dist/llm-gateway-copilot-prox
 ```json
 {
   "llmGatewayCopilotProxy.gatewayUrl": "ws://localhost:3000/ws/copilot-proxy",
-  "llmGatewayCopilotProxy.proxyToken": "<proxy-token>"
+  "llmGatewayCopilotProxy.proxyToken": "<proxy-token>",
+  "llmGatewayCopilotProxy.enableGatewayAuth": true
 }
 ```
 
 6. Ensure the GitHub Copilot extension is installed, enabled, and signed in inside VS Code. The extension status bar item should show that the proxy is connected. If Copilot is unavailable or the token is rejected, use the command **LLM Gateway Copilot Proxy: Show Output** for details.
-
 7. Discover Copilot-backed models through the gateway web/API server:
 
 ```bash
@@ -207,15 +211,15 @@ Use `copilot-*` exactly as you would use any other gateway model. If no VS Code 
 
 Failure modes surface through the extension status bar and gateway responses:
 
-| State | Meaning | Action |
-| --- | --- | --- |
-| Extension disconnected | VS Code extension is not connected to `/ws/copilot-proxy` | Start VS Code, check `gatewayUrl`, or run the reconnect command |
-| Copilot unavailable | VS Code has no available Copilot language models | Sign in to Copilot, enable the Copilot extension, or wait for Copilot availability to recover |
-| Gateway unreachable | WebSocket connection failed or closed unexpectedly | Check gateway process, network, and proxy URL |
-| Proxy token expired/rejected | Gateway closed the WebSocket with policy violation | Issue a new proxy token and update VS Code settings |
-| Stream interrupted | The extension disconnected or Copilot failed mid-request | Retry after confirming the extension is connected |
-| Unsupported tools | A client requested tools for a Copilot model while the extension reports `supports_tools: false` | Retry without tools or use a direct gateway model that supports tools |
-| Capacity exhausted | All healthy extension connections are at the configured in-flight limit | Wait, lower client concurrency, or connect another VS Code extension instance |
+| State                        | Meaning                                                                                           | Action                                                                                        |
+| ---------------------------- | ------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| Extension disconnected       | VS Code extension is not connected to`/ws/copilot-proxy`                                        | Start VS Code, check`gatewayUrl`, or run the reconnect command                              |
+| Copilot unavailable          | VS Code has no available Copilot language models                                                  | Sign in to Copilot, enable the Copilot extension, or wait for Copilot availability to recover |
+| Gateway unreachable          | WebSocket connection failed or closed unexpectedly                                                | Check gateway process, network, and proxy URL                                                 |
+| Proxy token expired/rejected | Gateway closed the WebSocket with policy violation                                                | Issue a new proxy token and update VS Code settings                                           |
+| Stream interrupted           | The extension disconnected or Copilot failed mid-request                                          | Retry after confirming the extension is connected                                             |
+| Unsupported tools            | A client requested tools for a Copilot model while the extension reports`supports_tools: false` | Retry without tools or use a direct gateway model that supports tools                         |
+| Capacity exhausted           | All healthy extension connections are at the configured in-flight limit                           | Wait, lower client concurrency, or connect another VS Code extension instance                 |
 
 The gateway never accepts GitHub Copilot credentials. Copilot auth stays in VS Code; only scoped llm-gateway proxy tokens belong in extension settings.
 
