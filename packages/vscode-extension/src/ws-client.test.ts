@@ -25,6 +25,7 @@ class FakeSocket {
 const config: ExtensionConfig = {
   gatewayUrl: "ws://localhost:3000/ws/copilot-proxy",
   proxyToken: "cpx_secret",
+  enableGatewayAuth: true,
   reconnectInitialDelayMs: 10,
   reconnectMaxDelayMs: 30,
 };
@@ -243,5 +244,40 @@ describe("CopilotProxyWebSocketClient", () => {
       JSON.stringify({ type: "disconnect", reason: "Extension deactivated." }),
     );
     expect(statusBar.setStatus).toHaveBeenCalledWith("disconnected");
+  });
+
+  it("connects without token query when gateway auth is disabled", () => {
+    const sockets: FakeSocket[] = [];
+    const client = new CopilotProxyWebSocketClient({
+      config: {
+        ...config,
+        enableGatewayAuth: false,
+        proxyToken: "",
+      },
+      logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        show: vi.fn(),
+        dispose: vi.fn(),
+      } as never,
+      statusBar: { setStatus: vi.fn(), dispose: vi.fn() } as never,
+      registrationProvider: () => ({
+        type: "register",
+        extension_version: "0.1.0",
+        copilot_status: "connected",
+        models: [],
+      }),
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    client.connect();
+
+    expect(sockets[0]?.url).toBe("ws://localhost:3000/ws/copilot-proxy");
   });
 });

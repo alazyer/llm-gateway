@@ -47,6 +47,11 @@
           "default": "",
           "description": "Scoped Copilot proxy token issued by llm-gateway."
         },
+        "llmGatewayCopilotProxy.enableGatewayAuth": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable gateway token auth for the proxy WebSocket connection. When false, the extension connects without the token query parameter and proxyToken is not required."
+        },
         "llmGatewayCopilotProxy.reconnectInitialDelayMs": {
           "type": "number",
           "default": 1000,

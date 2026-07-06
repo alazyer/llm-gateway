@@ -46,9 +46,15 @@ function defaultWebSocketFactory(url: string): WebSocketLike {
   return new WebSocket(url) as unknown as WebSocketLike;
 }
 
-function buildWebSocketUrl(gatewayUrl: string, proxyToken: string): string {
+function buildWebSocketUrl(
+  gatewayUrl: string,
+  proxyToken: string,
+  enableGatewayAuth: boolean,
+): string {
   const url = new URL(gatewayUrl);
-  url.searchParams.set("token", proxyToken);
+  if (enableGatewayAuth) {
+    url.searchParams.set("token", proxyToken);
+  }
   return url.toString();
 }
 
@@ -104,6 +110,7 @@ export class CopilotProxyWebSocketClient {
     const url = buildWebSocketUrl(
       this.options.config.gatewayUrl,
       this.options.config.proxyToken,
+      this.options.config.enableGatewayAuth,
     );
     this.socket = this.webSocketFactory(url);
     this.socket.onopen = () => {

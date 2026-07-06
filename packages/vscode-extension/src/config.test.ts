@@ -18,6 +18,7 @@ describe("extension config", () => {
   it("loads configured gateway settings", async () => {
     values.set("gatewayUrl", " ws://gateway/ws/copilot-proxy ");
     values.set("proxyToken", " cpx_secret ");
+    values.set("enableGatewayAuth", false);
     values.set("reconnectInitialDelayMs", 500);
     values.set("reconnectMaxDelayMs", 5000);
     values.set("logLevel", "debug");
@@ -28,6 +29,7 @@ describe("extension config", () => {
     expect(config).toEqual({
       gatewayUrl: "ws://gateway/ws/copilot-proxy",
       proxyToken: "cpx_secret",
+      enableGatewayAuth: false,
       reconnectInitialDelayMs: 500,
       reconnectMaxDelayMs: 5000,
       logLevel: "debug",
@@ -35,8 +37,18 @@ describe("extension config", () => {
     expect(isExtensionConfigComplete(config)).toBe(true);
   });
 
-  it("detects incomplete config", async () => {
+  it("detects incomplete config when auth is enabled", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", true);
     const { isExtensionConfigComplete, loadExtensionConfig } = await import("./config.js");
     expect(isExtensionConfigComplete(loadExtensionConfig())).toBe(false);
+  });
+
+  it("allows missing proxyToken when auth is disabled", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", false);
+
+    const { isExtensionConfigComplete, loadExtensionConfig } = await import("./config.js");
+    expect(isExtensionConfigComplete(loadExtensionConfig())).toBe(true);
   });
 });

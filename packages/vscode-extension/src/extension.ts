@@ -63,12 +63,12 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
   logger.info(
     `Loaded proxy configuration: gatewayUrl=${config.gatewayUrl || "<missing>"}, proxyToken=${
       config.proxyToken ? "configured" : "<missing>"
-    }, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
+    }, enableGatewayAuth=${config.enableGatewayAuth}, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
   );
   if (!isExtensionConfigComplete(config)) {
     const missing = [
       config.gatewayUrl ? undefined : "gatewayUrl",
-      config.proxyToken ? undefined : "proxyToken",
+      !config.enableGatewayAuth || config.proxyToken ? undefined : "proxyToken",
     ].filter((value): value is string => value !== undefined);
     statusBar.setStatus("disconnected");
     logger.warn(
