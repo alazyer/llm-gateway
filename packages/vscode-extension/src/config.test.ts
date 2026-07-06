@@ -20,6 +20,7 @@ describe("extension config", () => {
     values.set("proxyToken", " cpx_secret ");
     values.set("reconnectInitialDelayMs", 500);
     values.set("reconnectMaxDelayMs", 5000);
+    values.set("logLevel", "debug");
 
     const { isExtensionConfigComplete, loadExtensionConfig } = await import("./config.js");
     const config = loadExtensionConfig();
@@ -29,6 +30,7 @@ describe("extension config", () => {
       proxyToken: "cpx_secret",
       reconnectInitialDelayMs: 500,
       reconnectMaxDelayMs: 5000,
+      logLevel: "debug",
     });
     expect(isExtensionConfigComplete(config)).toBe(true);
   });

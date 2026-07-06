@@ -37,6 +37,8 @@ function createClient() {
     return socket;
   };
   const logger = {
+    debug: vi.fn(),
+
     info: vi.fn(),
     warn: vi.fn(),
     error: vi.fn(),
@@ -105,6 +107,8 @@ describe("CopilotProxyWebSocketClient", () => {
     const requestHandler = vi.fn();
     const cancelHandler = vi.fn();
     const logger = {
+      debug: vi.fn(),
+
       info: vi.fn(),
       warn: vi.fn(),
       error: vi.fn(),
@@ -187,6 +191,8 @@ describe("CopilotProxyWebSocketClient", () => {
     const client = new CopilotProxyWebSocketClient({
       config,
       logger: {
+        debug: vi.fn(),
+
         info: vi.fn(),
         warn: vi.fn(),
         error: vi.fn(),

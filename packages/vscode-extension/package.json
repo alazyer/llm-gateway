@@ -58,6 +58,17 @@
           "default": 30000,
           "minimum": 1000,
           "description": "Maximum reconnect delay in milliseconds."
+        },
+        "llmGatewayCopilotProxy.logLevel": {
+          "type": "string",
+          "enum": [
+            "debug",
+            "info",
+            "warn",
+            "error"
+          ],
+          "default": "info",
+          "description": "Minimum log level for the Copilot proxy output channel. Use debug for diagnostic metadata; prompt and response text are never logged."
         }
       }
     }

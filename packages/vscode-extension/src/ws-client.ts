@@ -127,13 +127,13 @@ export class CopilotProxyWebSocketClient {
     if (this.reconnectTimer) {
       this.clearTimeoutFn(this.reconnectTimer);
       this.reconnectTimer = undefined;
-      this.options.logger.info("Cleared pending gateway reconnect timer.");
+      this.options.logger.debug("Cleared pending gateway reconnect timer.");
     }
     this.stopStatusUpdates();
 
     if (this.socket) {
       this.socket.send(JSON.stringify({ type: "disconnect", reason: "Extension deactivated." }));
-      this.options.logger.info("Sent gateway disconnect frame.");
+      this.options.logger.debug("Sent gateway disconnect frame.");
       this.socket.close(1000, "Extension deactivated.");
     }
     this.socket = undefined;
@@ -148,6 +148,9 @@ export class CopilotProxyWebSocketClient {
     this.socket?.send(JSON.stringify(registration));
     this.options.logger.info(
       `Sent proxy registration: status=${registration.copilot_status}, models=${registration.models.length}.`,
+    );
+    this.options.logger.debug(
+      `Registration frame details: modelIds=${registration.models.map((model) => model.id).join(", ") || "none"}.`,
     );
     this.startStatusUpdates();
   }
@@ -171,6 +174,7 @@ export class CopilotProxyWebSocketClient {
     }
 
     if (message.type === "ping") {
+      this.options.logger.debug("Received gateway ping; sending pong.");
       this.socket?.send(JSON.stringify({ type: "pong" }));
       return;
     }
@@ -180,6 +184,7 @@ export class CopilotProxyWebSocketClient {
         `Received gateway request ${message.id}: model=${message.model}, messages=${message.messages.length}.`,
       );
       void this.options.requestHandler?.(message, (outbound) => {
+        this.options.logger.debug(`Sending extension frame for request ${message.id}: ${getFrameType(outbound)}.`);
         this.socket?.send(JSON.stringify(outbound));
       });
       return;
@@ -215,6 +220,7 @@ export class CopilotProxyWebSocketClient {
     );
     this.reconnectTimer = this.setTimeoutFn(() => {
       this.reconnectTimer = undefined;
+      this.options.logger.debug("Gateway reconnect timer fired.");
       this.connect();
     }, delay);
   }
@@ -228,7 +234,7 @@ export class CopilotProxyWebSocketClient {
     this.statusTimer = this.setIntervalFn(() => {
       void this.sendStatusUpdate();
     }, this.options.statusPollIntervalMs ?? 30_000);
-    this.options.logger.info("Started gateway status update timer.");
+    this.options.logger.debug("Started gateway status update timer.");
   }
 
   private stopStatusUpdates(): void {
@@ -238,13 +244,22 @@ export class CopilotProxyWebSocketClient {
 
     this.clearIntervalFn(this.statusTimer);
     this.statusTimer = undefined;
-    this.options.logger.info("Stopped gateway status update timer.");
+    this.options.logger.debug("Stopped gateway status update timer.");
   }
 
   private async sendStatusUpdate(): Promise<void> {
     const update = await this.options.statusProvider?.();
     if (update) {
+      this.options.logger.debug(
+        `Sending status update: status=${update.copilot_status}, models=${update.available_models.length}.`,
+      );
       this.socket?.send(JSON.stringify(update));
     }
   }
+}
+
+function getFrameType(value: unknown): string {
+  return typeof value === "object" && value !== null && "type" in value
+    ? String(value.type)
+    : "unknown";
 }

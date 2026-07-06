@@ -1,10 +1,12 @@
 import * as vscode from "vscode";
+import { normalizeLogLevel, type LogLevel } from "./logger.js";
 
 export interface ExtensionConfig {
   gatewayUrl: string;
   proxyToken: string;
   reconnectInitialDelayMs: number;
   reconnectMaxDelayMs: number;
+  logLevel: LogLevel;
 }
 
 const CONFIG_SECTION = "llmGatewayCopilotProxy";
@@ -26,6 +28,7 @@ export function loadExtensionConfig(): ExtensionConfig {
     proxyToken: config.get<string>("proxyToken", "").trim(),
     reconnectInitialDelayMs: readNumber(config, "reconnectInitialDelayMs", 1000),
     reconnectMaxDelayMs: readNumber(config, "reconnectMaxDelayMs", 30000),
+    logLevel: normalizeLogLevel(config.get<string>("logLevel", "info")),
   };
 }
 

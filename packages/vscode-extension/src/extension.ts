@@ -59,12 +59,11 @@ export function deactivate(): void {
 
 function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): void {
   const config = loadExtensionConfig();
+  logger.setLevel(config.logLevel);
   logger.info(
     `Loaded proxy configuration: gatewayUrl=${config.gatewayUrl || "<missing>"}, proxyToken=${
       config.proxyToken ? "configured" : "<missing>"
-    }, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${
-      config.reconnectMaxDelayMs
-    }.`,
+    }, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
   );
   if (!isExtensionConfigComplete(config)) {
     const missing = [
@@ -108,6 +107,7 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
   const buildRegistration = async (): Promise<CopilotProxyRegisterMessage> => {
     const models = await bridge.discoverModels({ reason: "registration" });
     const copilotStatus = updateAvailabilityStatus(models, "Registration");
+    logger.debug(`Registration model IDs: ${models.map((model) => model.id).join(", ") || "none"}.`);
 
     const registration: CopilotProxyRegisterMessage = {
       type: "register",
@@ -122,6 +122,7 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
   const buildStatusUpdate = async (): Promise<CopilotProxyStatusUpdateMessage> => {
     const models = await bridge.discoverModels({ reason: "status update", log: false });
     const copilotStatus = updateAvailabilityStatus(models, "Status update");
+    logger.debug(`Status update model IDs: ${models.map((model) => model.id).join(", ") || "none"}.`);
 
     const status: CopilotProxyStatusUpdateMessage = {
       type: "status_update",
