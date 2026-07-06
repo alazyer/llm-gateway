@@ -3,6 +3,8 @@ import type {
   CopilotProxyExtensionMessage,
   CopilotProxyModel,
   CopilotProxyRequestMessage,
+  CopilotProxyTool,
+  CopilotProxyToolChoice,
 } from "@llm-gateway/shared";
 
 import { toGatewayModel } from "./model-registry.js";
@@ -40,6 +42,9 @@ export class CopilotBridge {
 
     if (shouldLog) {
       this.logger?.info(`Discovered ${gatewayModels.length} Copilot language model(s)${reason}.`);
+      this.logger?.debug(
+        `Discovered Copilot model IDs${reason}: ${gatewayModels.map((model) => model.id).join(", ") || "none"}.`,
+      );
     }
 
     return gatewayModels;
@@ -52,23 +57,6 @@ export class CopilotBridge {
     this.logger?.info(
       `Starting Copilot request ${request.id}: model=${request.model}, messages=${request.messages.length}, tools=${request.tools?.length ?? 0}.`,
     );
-
-    if (request.tools && request.tools.length > 0) {
-      this.logger?.warn(
-        `Rejecting Copilot request ${request.id}: ${request.tools.length} tool(s) requested but tool support is disabled.`,
-      );
-      send({
-        type: "stream_error",
-        id: request.id,
-        partial: false,
-        error: {
-          code: "tools_unsupported",
-          message: "This Copilot bridge does not currently advertise tool support.",
-          status: 400,
-        },
-      });
-      return;
-    }
 
     const model = await this.getModel(request.model);
     if (!model) {
@@ -93,6 +81,7 @@ export class CopilotBridge {
     this.activeRequests.set(request.id, cancellation);
     let partial = false;
     let streamParts = 0;
+    const startedAt = Date.now();
 
     try {
       const requestOptions: vscode.LanguageModelChatRequestOptions = {
@@ -101,6 +90,16 @@ export class CopilotBridge {
       if (request.params) {
         requestOptions.modelOptions = request.params;
       }
+      if (request.tools && request.tools.length > 0) {
+        requestOptions.tools = request.tools.map(toLanguageModelChatTool);
+        const toolMode = toLanguageModelToolMode(request.params?.tool_choice);
+        if (toolMode !== undefined) {
+          requestOptions.toolMode = toolMode;
+        }
+      }
+      this.logger?.debug(
+        `Copilot request ${request.id} options: hasParams=${request.params ? "true" : "false"}, hasTools=${request.tools ? "true" : "false"}, toolMode=${requestOptions.toolMode ?? "default"}, activeRequests=${this.activeRequests.size}.`,
+      );
 
       const response = await model.sendRequest(
         request.messages.map(toLanguageModelMessage),
@@ -124,9 +123,13 @@ export class CopilotBridge {
       this.logger?.info(
         `Completed Copilot request ${request.id}: streamed ${streamParts} part(s).`,
       );
+      this.logger?.debug(`Copilot request ${request.id} durationMs=${Date.now() - startedAt}.`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.logger?.error(`Copilot request ${request.id} failed: ${message}`);
+      this.logger?.debug(
+        `Copilot request ${request.id} failed after ${Date.now() - startedAt}ms with partial=${partial}.`,
+      );
       send({
         type: "stream_error",
         id: request.id,
@@ -170,8 +173,115 @@ function toLanguageModelMessage(
   message: CopilotProxyRequestMessage["messages"][number],
 ): vscode.LanguageModelChatMessage {
   if (message.role === "assistant") {
+    if (message.tool_calls && message.tool_calls.length > 0) {
+      const parts: Array<vscode.LanguageModelTextPart | vscode.LanguageModelToolCallPart> = [];
+      if (message.content) {
+        parts.push(new vscode.LanguageModelTextPart(message.content));
+      }
+      for (const toolCall of message.tool_calls) {
+        let input: object;
+        try {
+          input = JSON.parse(toolCall.function.arguments);
+        } catch {
+          input = {};
+        }
+        parts.push(new vscode.LanguageModelToolCallPart(toolCall.id, toolCall.function.name, input));
+      }
+      return vscode.LanguageModelChatMessage.Assistant(parts);
+    }
     return vscode.LanguageModelChatMessage.Assistant(message.content);
   }
 
+  // Tool-result messages: In a multi-turn tool conversation, after the model
+  // emits a LanguageModelToolCallPart (assistant role, tool_calls), the external
+  // tool responds with a tool-result message (role: "tool", tool_call_id
+  // matching the call's id, content with the result). This must be converted to
+  // a LanguageModelToolResultPart so the model can correlate the result with
+  // the original tool call in the next sendRequest() message history.
+  //
+  // The tool_call_id is essential — it links the result back to the specific
+  // tool invocation the model made. Without it, the model cannot determine
+  // which tool call the result belongs to. The gateway protocol requires
+  // tool_call_id on tool-role messages; the fallback to "" is a safety net for
+  // malformed messages but will produce incorrect model behavior if hit.
+  if (message.role === "tool") {
+    const toolCallId = message.tool_call_id ?? "";
+    if (!message.tool_call_id) {
+      // Log a warning — tool results without a call ID cannot be correctly
+      // correlated. This should not happen per the gateway protocol but we
+      // handle it gracefully rather than dropping the message entirely.
+      // eslint-disable-next-line no-console -- bridge logger not available in pure function
+      console.warn(
+        `Tool-result message missing tool_call_id; mapping with empty ID. ` +
+        `This will likely cause incorrect multi-turn tool conversation behavior.`,
+      );
+    }
+    const resultContent = [
+      new vscode.LanguageModelTextPart(message.content),
+    ];
+    const resultPart = new vscode.LanguageModelToolResultPart(
+      toolCallId,
+      resultContent,
+    );
+    return vscode.LanguageModelChatMessage.User([resultPart]);
+  }
+
+  // System-role and developer-role messages: The stable vscode.lm API provides
+  // only User() and Assistant() factories on LanguageModelChatMessage — there is
+  // no System() or Developer() factory. The languageModelSystem proposed API
+  // would add proper system-role support, but using it requires
+  // enabledApiProposals which blocks Marketplace publishing. As a stable-API
+  // workaround, both system and developer messages are mapped to User()
+  // messages. This is effective for most instruction-following scenarios since
+  // Copilot models treat User messages with instruction-like content similarly
+  // to system/developer prompts. The "developer" role (OpenAI-style) conveys
+  // developer-level instructions that override system-level ones; in the
+  // stable-API mapping, they are treated identically to system messages. If
+  // languageModelSystem becomes stable in a future VS Code release, this
+  // mapping should be upgraded to use System() messages directly.
+  if (message.role === "system" || message.role === "developer") {
+    return vscode.LanguageModelChatMessage.User(message.content);
+  }
+
   return vscode.LanguageModelChatMessage.User(message.content);
+}
+
+function toLanguageModelChatTool(tool: CopilotProxyTool): vscode.LanguageModelChatTool {
+  return {
+    name: tool.function.name,
+    description: tool.function.description ?? "",
+    inputSchema: tool.function.parameters,
+  };
+}
+
+function toLanguageModelToolMode(
+  toolChoice?: CopilotProxyToolChoice,
+): vscode.LanguageModelChatToolMode | undefined {
+  if (toolChoice === undefined) {
+    return undefined;
+  }
+
+  if (toolChoice === "auto") {
+    return vscode.LanguageModelChatToolMode.Auto;
+  }
+
+  if (toolChoice === "required") {
+    return vscode.LanguageModelChatToolMode.Required;
+  }
+
+  if (toolChoice === "none") {
+    // "none" means the model should not call any tools — we don't pass
+    // toolMode at all when tool_choice is "none" because the stable API
+    // doesn't have an explicit "none" mode. The model will see the tools
+    // list but the absence of toolMode signals it should prefer text.
+    return undefined;
+  }
+
+  // Named function tool_choice: treat as Auto — the model will
+  // prefer the named function but isn't forced.
+  if (typeof toolChoice === "object" && toolChoice.type === "function") {
+    return vscode.LanguageModelChatToolMode.Auto;
+  }
+
+  return undefined;
 }
