@@ -726,6 +726,63 @@ describe("Copilot proxy WebSocket", () => {
     }
   });
 
+  it("clamps tiny Anthropic max_tokens values on Copilot requests", async () => {
+    const app = createApp({ config });
+
+    try {
+      await app.ready();
+      const token = await issueProxyToken(app);
+      const ws = await app.injectWS(`/ws/copilot-proxy?token=${encodeURIComponent(token)}`);
+      ws.send(
+        JSON.stringify({
+          type: "register",
+          extension_version: "0.1.0",
+          copilot_status: "connected",
+          models: [copilotModel],
+        }),
+      );
+      await waitForModel(app, "copilot-gpt-4o", true);
+
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/messages",
+        headers: {
+          "x-api-key": "gateway-token",
+        },
+        payload: {
+          model: "copilot-gpt-4o",
+          messages: [{ role: "user", content: "Hello" }],
+          max_tokens: 1,
+        },
+      });
+
+      const requestMessage = await waitForGatewayMessage(ws, "request");
+      expect(requestMessage).toMatchObject({
+        type: "request",
+        model: "copilot-gpt-4o",
+        params: {
+          max_tokens: 16,
+        },
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "stream_delta",
+          id: requestMessage.id,
+          content_type: "text",
+          content: "Anthropic via Copilot",
+        }),
+      );
+      ws.send(JSON.stringify({ type: "stream_done", id: requestMessage.id }));
+
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(200);
+      ws.close();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("routes streaming Anthropic messages through the extension", async () => {
     const app = createApp({ config });
 
@@ -775,6 +832,63 @@ describe("Copilot proxy WebSocket", () => {
       expect(response.body).toContain("event: content_block_delta");
       expect(response.body).toContain("Streamed Anthropic");
       expect(response.body).toContain("event: message_stop");
+      ws.close();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("clamps tiny Responses max_output_tokens values on Copilot requests", async () => {
+    const app = createApp({ config });
+
+    try {
+      await app.ready();
+      const token = await issueProxyToken(app);
+      const ws = await app.injectWS(`/ws/copilot-proxy?token=${encodeURIComponent(token)}`);
+      ws.send(
+        JSON.stringify({
+          type: "register",
+          extension_version: "0.1.0",
+          copilot_status: "connected",
+          models: [copilotModel],
+        }),
+      );
+      await waitForModel(app, "copilot-gpt-4o", true);
+
+      const responsePromise = app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        headers: {
+          "x-api-key": "gateway-token",
+        },
+        payload: {
+          model: "copilot-gpt-4o",
+          input: "Hello",
+          max_output_tokens: 1,
+        },
+      });
+
+      const requestMessage = await waitForGatewayMessage(ws, "request");
+      expect(requestMessage).toMatchObject({
+        type: "request",
+        model: "copilot-gpt-4o",
+        params: {
+          max_tokens: 16,
+        },
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "stream_delta",
+          id: requestMessage.id,
+          content_type: "text",
+          content: "Hello from Copilot",
+        }),
+      );
+      ws.send(JSON.stringify({ type: "stream_done", id: requestMessage.id }));
+
+      const response = await responsePromise;
+      expect(response.statusCode).toBe(200);
       ws.close();
     } finally {
       await app.close();

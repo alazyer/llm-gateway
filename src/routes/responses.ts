@@ -164,6 +164,8 @@ interface CopilotToolCallState {
     arguments: string;
 }
 
+  const COPILOT_MIN_MAX_TOKENS = 16;
+
 function isCopilotModelName(model: string | undefined): model is `copilot-${string}` {
     return typeof model === "string" && model.startsWith("copilot-");
 }
@@ -248,7 +250,10 @@ function resolveCopilotModel(
       params.top_p = request.top_p;
     }
     if (request.max_completion_tokens !== undefined) {
-      params.max_tokens = request.max_completion_tokens;
+      params.max_tokens = Math.max(
+        COPILOT_MIN_MAX_TOKENS,
+        request.max_completion_tokens,
+      );
     }
     if (request.stop !== undefined) {
       params.stop = request.stop;
