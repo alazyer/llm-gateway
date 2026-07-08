@@ -58,10 +58,9 @@ function isCopilotProxyModel(value: unknown): value is CopilotProxyModel {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
-    value.id.startsWith("copilot-") &&
     typeof value.name === "string" &&
     typeof value.native_id === "string" &&
-    value.source === "copilot-proxy" &&
+    typeof value.source === "string" &&
     isModelCapabilities(value.capabilities)
   );
 }

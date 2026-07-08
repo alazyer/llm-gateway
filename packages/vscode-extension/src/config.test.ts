@@ -30,6 +30,7 @@ describe("extension config", () => {
       gatewayUrl: "ws://gateway/ws/copilot-proxy",
       proxyToken: "cpx_secret",
       enableGatewayAuth: false,
+      modelPrefix: "copilot-",
       reconnectInitialDelayMs: 500,
       reconnectMaxDelayMs: 5000,
       logLevel: "debug",
@@ -50,5 +51,43 @@ describe("extension config", () => {
 
     const { isExtensionConfigComplete, loadExtensionConfig } = await import("./config.js");
     expect(isExtensionConfigComplete(loadExtensionConfig())).toBe(true);
+  });
+
+  it("defaults modelPrefix to copilot-", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", false);
+
+    const { loadExtensionConfig } = await import("./config.js");
+    const config = loadExtensionConfig();
+    expect(config.modelPrefix).toBe("copilot-");
+  });
+
+  it("reads a custom modelPrefix from configuration", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", false);
+    values.set("modelPrefix", "alazyer-");
+
+    const { loadExtensionConfig } = await import("./config.js");
+    const config = loadExtensionConfig();
+    expect(config.modelPrefix).toBe("alazyer-");
+  });
+
+  it("trims whitespace from modelPrefix", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", false);
+    values.set("modelPrefix", " custom- ");
+
+    const { loadExtensionConfig } = await import("./config.js");
+    const config = loadExtensionConfig();
+    expect(config.modelPrefix).toBe("custom-");
+  });
+
+  it("detects incomplete config when modelPrefix is empty", async () => {
+    values.set("gatewayUrl", "ws://gateway/ws/copilot-proxy");
+    values.set("enableGatewayAuth", false);
+    values.set("modelPrefix", "");
+
+    const { isExtensionConfigComplete, loadExtensionConfig } = await import("./config.js");
+    expect(isExtensionConfigComplete(loadExtensionConfig())).toBe(false);
   });
 });

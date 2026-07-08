@@ -22,7 +22,10 @@ export class CopilotBridge {
   private readonly activeRequests = new Map<string, vscode.CancellationTokenSource>();
   private readonly models = new Map<string, vscode.LanguageModelChat>();
 
-  public constructor(private readonly logger?: ExtensionLogger) {}
+  public constructor(
+    private readonly modelPrefix: string = "copilot-",
+    private readonly logger?: ExtensionLogger,
+  ) {}
 
   public async discoverModels(options: DiscoverModelsOptions = {}): Promise<CopilotProxyModel[]> {
     const shouldLog = options.log ?? true;
@@ -35,7 +38,7 @@ export class CopilotBridge {
     this.models.clear();
 
     const gatewayModels = models.map((model) => {
-      const gatewayModel = toGatewayModel(model);
+      const gatewayModel = toGatewayModel(model, this.modelPrefix);
       this.models.set(gatewayModel.id, model);
       return gatewayModel;
     });

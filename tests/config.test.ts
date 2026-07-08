@@ -401,6 +401,7 @@ models:
         heartbeatIntervalMs: 30000,
         heartbeatTimeoutMs: 10000,
         maxInflightPerConnection: 4,
+        allowedPrefixes: ["copilot-"],
       });
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
@@ -442,7 +443,40 @@ models:
         heartbeatIntervalMs: 5000,
         heartbeatTimeoutMs: 2000,
         maxInflightPerConnection: 2,
+        allowedPrefixes: ["copilot-"],
       });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it("loads copilot_proxy_allowed_prefixes from YAML", () => {
+    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+    const configPath = join(tempDir, "gateway.config.yaml");
+
+    writeFileSync(
+      configPath,
+      `copilot_proxy_enabled: true
+copilot_proxy_allowed_prefixes:
+  - copilot-
+  - alazyer-
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+      "utf8",
+    );
+
+    try {
+      const config = loadConfig({
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GLM_API_KEY: "api-key-a",
+      });
+
+      expect(config.copilotProxy?.allowedPrefixes).toEqual(["copilot-", "alazyer-"]);
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

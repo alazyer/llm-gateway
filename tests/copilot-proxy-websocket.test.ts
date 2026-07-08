@@ -13,7 +13,7 @@ const copilotModel: CopilotProxyModel = {
   id: "copilot-gpt-4o",
   name: "GPT-4o via Copilot",
   native_id: "gpt-4o",
-  source: "copilot-proxy",
+  source: "copilot-",
   capabilities: {
     supports_streaming: true,
     supports_tools: false,
@@ -40,6 +40,7 @@ const config: AppConfig = {
     heartbeatIntervalMs: 20,
     heartbeatTimeoutMs: 100,
     maxInflightPerConnection: 4,
+    allowedPrefixes: ["copilot-"],
   },
   models: [
     {
@@ -199,7 +200,7 @@ describe("Copilot proxy WebSocket", () => {
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toMatchObject({
         id: "copilot-gpt-4o",
-        source: "copilot-proxy",
+        source: "copilot-",
         owned_by: "github-copilot",
         capabilities: {
           supports_responses_api: true,
@@ -276,7 +277,7 @@ describe("Copilot proxy WebSocket", () => {
       );
 
       const closeCode = await waitForClose(ws);
-      expect(closeCode).toBe(1003);
+      expect(closeCode).toBe(1008);
       await waitForModel(app, "copilot-gpt-4o", false);
     } finally {
       await app.close();

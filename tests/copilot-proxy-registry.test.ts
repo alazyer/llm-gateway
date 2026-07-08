@@ -11,7 +11,7 @@ const model: CopilotProxyModel = {
   id: "copilot-gpt-4o",
   name: "GPT-4o via Copilot",
   native_id: "gpt-4o",
-  source: "copilot-proxy",
+  source: "copilot-",
   capabilities: {
     supports_streaming: true,
     supports_tools: true,

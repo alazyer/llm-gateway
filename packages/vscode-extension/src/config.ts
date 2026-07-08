@@ -5,6 +5,7 @@ export interface ExtensionConfig {
   gatewayUrl: string;
   proxyToken: string;
   enableGatewayAuth: boolean;
+  modelPrefix: string;
   reconnectInitialDelayMs: number;
   reconnectMaxDelayMs: number;
   logLevel: LogLevel;
@@ -28,6 +29,7 @@ export function loadExtensionConfig(): ExtensionConfig {
     gatewayUrl: config.get<string>("gatewayUrl", "").trim(),
     proxyToken: config.get<string>("proxyToken", "").trim(),
     enableGatewayAuth: config.get<boolean>("enableGatewayAuth", true),
+    modelPrefix: config.get<string>("modelPrefix", "copilot-").trim(),
     reconnectInitialDelayMs: readNumber(config, "reconnectInitialDelayMs", 1000),
     reconnectMaxDelayMs: readNumber(config, "reconnectMaxDelayMs", 30000),
     logLevel: normalizeLogLevel(config.get<string>("logLevel", "info")),
@@ -35,5 +37,9 @@ export function loadExtensionConfig(): ExtensionConfig {
 }
 
 export function isExtensionConfigComplete(config: ExtensionConfig): boolean {
-  return config.gatewayUrl.length > 0 && (!config.enableGatewayAuth || config.proxyToken.length > 0);
+  return (
+    config.gatewayUrl.length > 0 &&
+    config.modelPrefix.length > 0 &&
+    (!config.enableGatewayAuth || config.proxyToken.length > 0)
+  );
 }

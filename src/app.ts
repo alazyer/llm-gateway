@@ -29,7 +29,7 @@ export function createApp(options: CreateAppOptions) {
   const copilotProxyTokenStore = new CopilotProxyTokenStore({
     tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
   });
-  const copilotProxyRegistry = new CopilotProxyConnectionRegistry();
+  const copilotProxyRegistry = new CopilotProxyConnectionRegistry(copilotProxyConfig.allowedPrefixes);
   const app = Fastify({
     bodyLimit: options.config.maxBodySizeKb * 1024,
     logger: {
@@ -122,6 +122,28 @@ export function createApp(options: CreateAppOptions) {
     return reply.code(201).send(copilotProxyTokenStore.issueToken());
   });
 
+  app.get("/api/channels", async (_request, reply) => {
+    if (!copilotProxyConfig.enabled) {
+      return reply.code(403).send({
+        error: {
+          message: "Copilot proxy is disabled.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    if (!options.config.gatewayAuthToken) {
+      return reply.code(403).send({
+        error: {
+          message: "Gateway auth must be enabled to access channel information.",
+          type: "authentication_error",
+        },
+      });
+    }
+
+    return copilotProxyRegistry.getChannelsInfo();
+  });
+
   if (copilotProxyConfig.enabled) {
     void app.register(websocket);
     app.after((error) => {
@@ -142,9 +164,11 @@ export function createApp(options: CreateAppOptions) {
     client?: ChatCompletionsTransport;
     fetchFn?: typeof fetch;
     copilotProxyRegistry?: CopilotProxyConnectionRegistry;
+    allowedPrefixes?: readonly string[];
   } = {
     config: options.config,
     copilotProxyRegistry,
+    allowedPrefixes: copilotProxyConfig.allowedPrefixes,
   };
 
   if (options.client) {

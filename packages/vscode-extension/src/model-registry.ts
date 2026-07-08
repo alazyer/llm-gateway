@@ -1,13 +1,17 @@
 import type * as vscode from "vscode";
 import type { CopilotProxyModel } from "@llm-gateway/shared";
 
-function normalizeModelId(value: string): string {
+function normalizeModelId(value: string, modelPrefix: string): string {
   return value
     .trim()
     .toLowerCase()
-    .replace(/^copilot-/, "")
+    .replace(new RegExp(`^${escapeRegExp(modelPrefix.toLowerCase())}`), "")
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "");
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 /**
@@ -30,8 +34,8 @@ function readToolCallingCapability(model: vscode.LanguageModelChat): boolean | n
   return undefined;
 }
 
-export function toGatewayModel(model: vscode.LanguageModelChat): CopilotProxyModel {
-  const nativeId = normalizeModelId(model.id || model.family || model.name);
+export function toGatewayModel(model: vscode.LanguageModelChat, modelPrefix: string): CopilotProxyModel {
+  const nativeId = normalizeModelId(model.id || model.family || model.name, modelPrefix);
 
   const toolCalling = readToolCallingCapability(model);
   // If toolCalling is explicitly set, use it. Otherwise default to true
@@ -39,10 +43,10 @@ export function toGatewayModel(model: vscode.LanguageModelChat): CopilotProxyMod
   const supportsTools = typeof toolCalling === "boolean" ? toolCalling : typeof toolCalling === "number" ? true : true;
 
   return {
-    id: `copilot-${nativeId}`,
+    id: `${modelPrefix}${nativeId}`,
     name: model.name,
     native_id: model.id,
-    source: "copilot-proxy",
+    source: modelPrefix,
     capabilities: {
       supports_streaming: true,
       supports_tools: supportsTools,

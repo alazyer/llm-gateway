@@ -52,6 +52,12 @@
           "default": true,
           "description": "Enable gateway token auth for the proxy WebSocket connection. When false, the extension connects without the token query parameter and proxyToken is not required."
         },
+        "llmGatewayCopilotProxy.modelPrefix": {
+          "type": "string",
+          "default": "copilot-",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*-$",
+          "description": "Model ID prefix for registered Copilot models. Must end with a dash. Default 'copilot-' preserves backward compatibility."
+        },
         "llmGatewayCopilotProxy.reconnectInitialDelayMs": {
           "type": "number",
           "default": 1000,

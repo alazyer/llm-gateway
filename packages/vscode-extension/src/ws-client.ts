@@ -30,6 +30,7 @@ export interface CopilotProxyWebSocketClientOptions {
     send: (message: unknown) => void,
   ) => void | Promise<void>;
   cancelHandler?: (id: string) => void;
+  onPolicyViolation?: (reason: string) => void;
   webSocketFactory?: WebSocketFactory;
   setTimeoutFn?: typeof setTimeout;
   clearTimeoutFn?: typeof clearTimeout;
@@ -212,7 +213,8 @@ export class CopilotProxyWebSocketClient {
 
     if (code === 1008) {
       this.options.statusBar.setStatus("gateway-error");
-      this.options.logger.warn(`Gateway rejected proxy token: code=${code}, reason=${reason}`);
+      this.options.logger.warn(`Gateway rejected connection: code=${code}, reason=${reason}`);
+      this.options.onPolicyViolation?.(reason);
       return;
     }
 

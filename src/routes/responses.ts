@@ -108,7 +108,7 @@ interface ModelRecord {
     },
   ];
   base_instructions: string;
-  source?: "copilot-proxy";
+  source?: string;
 }
 
 interface AnthropicModelRecord {
@@ -116,7 +116,7 @@ interface AnthropicModelRecord {
   type: "model";
   display_name: string;
   created_at: string;
-  source?: "copilot-proxy";
+  source?: string;
 }
 
 interface ResponsesRoutesOptions {
@@ -124,6 +124,7 @@ interface ResponsesRoutesOptions {
   client?: ChatCompletionsTransport;
   fetchFn?: typeof fetch;
   copilotProxyRegistry?: CopilotProxyConnectionRegistry;
+  allowedPrefixes?: readonly string[];
 }
 
 interface TranslationOptions {
@@ -166,15 +167,16 @@ interface CopilotToolCallState {
 
   const COPILOT_MIN_MAX_TOKENS = 16;
 
-function isCopilotModelName(model: string | undefined): model is `copilot-${string}` {
-    return typeof model === "string" && model.startsWith("copilot-");
+function isProxiedModelName(model: string | undefined, allowedPrefixes: readonly string[]): model is string {
+    return typeof model === "string" && allowedPrefixes.some((prefix) => model.startsWith(prefix));
 }
 
 function resolveCopilotModel(
     registry: CopilotProxyConnectionRegistry | undefined,
     requestedModel: string | undefined,
+    allowedPrefixes: readonly string[],
 ): RegisteredCopilotProxyModel | undefined {
-    if (!isCopilotModelName(requestedModel)) {
+    if (!isProxiedModelName(requestedModel, allowedPrefixes)) {
       return undefined;
 }
 
@@ -626,7 +628,7 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
       },
     ],
     base_instructions: baseInstructions,
-    source: "copilot-proxy",
+    source: model.source,
   };
 }
 
@@ -661,7 +663,7 @@ function createCopilotAnthropicModelRecord(
     type: "model",
     display_name: model.name,
     created_at: new Date(model.created * 1_000).toISOString(),
-    source: "copilot-proxy",
+    source: model.source,
   };
 }
 
@@ -1309,6 +1311,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
       const copilotModel = resolveCopilotModel(
         options.copilotProxyRegistry,
         parsedRequest.model,
+        options.allowedPrefixes ?? ["copilot-"],
       );
       if (copilotModel) {
         if (unknownTopLevelFields.length > 0) {
@@ -1522,6 +1525,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
       const copilotModel = resolveCopilotModel(
         options.copilotProxyRegistry,
         parsedRequest.model,
+        options.allowedPrefixes ?? ["copilot-"],
       );
       if (copilotModel) {
         if (parsedRequest.stream && !copilotModel.capabilities.supports_streaming) {
@@ -1738,6 +1742,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
       const copilotModel = resolveCopilotModel(
         options.copilotProxyRegistry,
         parsedRequest.model,
+        options.allowedPrefixes ?? ["copilot-"],
       );
       if (copilotModel) {
         if (parsedRequest.stream && !copilotModel.capabilities.supports_streaming) {

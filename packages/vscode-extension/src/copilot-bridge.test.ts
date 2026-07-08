@@ -87,7 +87,28 @@ describe("CopilotBridge", () => {
         id: "copilot-gpt-4o",
         name: "GPT-4o",
         native_id: "gpt-4o",
-        source: "copilot-proxy",
+        source: "copilot-",
+        capabilities: {
+          supports_streaming: true,
+          supports_tools: true,
+          supports_usage: false,
+          supports_progress: false,
+          max_tokens: 100000,
+        },
+      },
+    ]);
+  });
+
+  it("uses a custom model prefix for gateway IDs and source", async () => {
+    const { CopilotBridge } = await import("./copilot-bridge.js");
+    const bridge = new CopilotBridge("alazyer-");
+
+    await expect(bridge.discoverModels()).resolves.toEqual([
+      {
+        id: "alazyer-gpt-4o",
+        name: "GPT-4o",
+        native_id: "gpt-4o",
+        source: "alazyer-",
         capabilities: {
           supports_streaming: true,
           supports_tools: true,
@@ -196,7 +217,7 @@ describe("CopilotBridge", () => {
       show: vi.fn(),
       dispose: vi.fn(),
     };
-    const bridge = new CopilotBridge(logger as never);
+    const bridge = new CopilotBridge("copilot-", logger as never);
     const sent: CopilotProxyExtensionMessage[] = [];
 
     await bridge.executeRequest(
@@ -675,7 +696,7 @@ describe("CopilotBridge", () => {
       show: vi.fn(),
       dispose: vi.fn(),
     };
-    const bridge = new CopilotBridge(logger as never);
+    const bridge = new CopilotBridge("copilot-", logger as never);
     const sent: CopilotProxyExtensionMessage[] = [];
 
     await bridge.executeRequest(
@@ -721,7 +742,7 @@ describe("CopilotBridge", () => {
       show: vi.fn(),
       dispose: vi.fn(),
     };
-    const bridge = new CopilotBridge(logger as never);
+    const bridge = new CopilotBridge("copilot-", logger as never);
     const executePromise = bridge.executeRequest(
       {
         type: "request",

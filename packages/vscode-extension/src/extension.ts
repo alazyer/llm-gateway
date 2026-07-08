@@ -63,7 +63,7 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
   logger.info(
     `Loaded proxy configuration: gatewayUrl=${config.gatewayUrl || "<missing>"}, proxyToken=${
       config.proxyToken ? "configured" : "<missing>"
-    }, enableGatewayAuth=${config.enableGatewayAuth}, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
+    }, enableGatewayAuth=${config.enableGatewayAuth}, modelPrefix=${config.modelPrefix}, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
   );
   if (!isExtensionConfigComplete(config)) {
     const missing = [
@@ -87,7 +87,7 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
     logger.info("Replacing existing gateway WebSocket client before reconnecting.");
     runtime.client.disconnect();
   }
-  const bridge = new CopilotBridge(logger);
+  const bridge = new CopilotBridge(config.modelPrefix, logger);
   let lastCopilotStatus: "connected" | "disconnected" | undefined;
   let lastModelCount: number | undefined;
 
@@ -141,6 +141,14 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
     statusProvider: buildStatusUpdate,
     requestHandler: (message, send) => bridge.executeRequest(message, send),
     cancelHandler: (id) => bridge.cancel(id),
+    onPolicyViolation: (reason) => {
+      vscode.window.showErrorMessage(
+        `LLM Gateway: The model prefix "${config.modelPrefix}" is not in the gateway allowlist. ` +
+        `Update the "llmGatewayCopilotProxy.modelPrefix" setting to use an allowed prefix, ` +
+        `or ask your gateway operator to add "${config.modelPrefix}" to the allowed prefixes. ` +
+        (reason ? `Gateway reason: ${reason}` : "").trim(),
+      );
+    },
   });
   runtime.client.connect();
 }

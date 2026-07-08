@@ -33,6 +33,11 @@ max_body_size_kb: 1024
 # copilot_proxy_heartbeat_interval_ms: 30000
 # copilot_proxy_heartbeat_timeout_ms: 10000
 # copilot_proxy_max_inflight_per_connection: 4
+# Allowed model ID prefixes for extension registrations. Extensions must register
+# models with IDs starting with one of these prefixes. Default: ["copilot-"]
+# copilot_proxy_allowed_prefixes:
+#   - copilot-
+#   - alazyer-
 
 models:
   - name: glm-5.1

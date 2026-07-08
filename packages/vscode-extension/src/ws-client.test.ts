@@ -26,8 +26,10 @@ const config: ExtensionConfig = {
   gatewayUrl: "ws://localhost:3000/ws/copilot-proxy",
   proxyToken: "cpx_secret",
   enableGatewayAuth: true,
+  modelPrefix: "copilot-",
   reconnectInitialDelayMs: 10,
   reconnectMaxDelayMs: 30,
+  logLevel: "info",
 };
 
 function createClient() {
@@ -168,6 +170,40 @@ describe("CopilotProxyWebSocketClient", () => {
     expect(statusBar.setStatus).toHaveBeenCalledWith("gateway-error");
     expect(sockets).toHaveLength(1);
     vi.useRealTimers();
+  });
+
+  it("invokes onPolicyViolation callback on 1008 close", () => {
+    const onPolicyViolation = vi.fn();
+    const sockets: FakeSocket[] = [];
+    const client = new CopilotProxyWebSocketClient({
+      config,
+      logger: {
+        debug: vi.fn(),
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn(),
+        show: vi.fn(),
+        dispose: vi.fn(),
+      } as never,
+      statusBar: { setStatus: vi.fn(), dispose: vi.fn() } as never,
+      registrationProvider: () => ({
+        type: "register",
+        extension_version: "0.1.0",
+        copilot_status: "connected",
+        models: [],
+      }),
+      onPolicyViolation,
+      webSocketFactory: (url) => {
+        const socket = new FakeSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+    });
+
+    client.connect();
+    sockets[0]?.onclose?.({ code: 1008, reason: "prefix not allowed" });
+
+    expect(onPolicyViolation).toHaveBeenCalledWith("prefix not allowed");
   });
 
   it("reconnects with bounded backoff after normal close", () => {

@@ -48,6 +48,7 @@ Top-level YAML settings:
 - `copilot_proxy_heartbeat_interval_ms` - optional WebSocket heartbeat interval, defaults to `30000`
 - `copilot_proxy_heartbeat_timeout_ms` - optional WebSocket heartbeat timeout, defaults to `10000`
 - `copilot_proxy_max_inflight_per_connection` - optional per-extension in-flight request cap, defaults to `4`
+- `copilot_proxy_allowed_prefixes` - optional list of model ID prefixes the gateway accepts from extension registrations, defaults to `["copilot-"]`
 - `models` - YAML model catalog entries
 
 Each YAML entry supports:
@@ -114,6 +115,8 @@ copilot_proxy_token_ttl_seconds: 86400
 copilot_proxy_heartbeat_interval_ms: 30000
 copilot_proxy_heartbeat_timeout_ms: 10000
 copilot_proxy_max_inflight_per_connection: 4
+copilot_proxy_allowed_prefixes:
+  - copilot-
 ```
 
 2. Set the gateway auth token in `.env` or your shell, then start the gateway web/API server:
@@ -153,7 +156,8 @@ code --install-extension packages/vscode-extension/dist/llm-gateway-copilot-prox
 {
   "llmGatewayCopilotProxy.gatewayUrl": "ws://localhost:3000/ws/copilot-proxy",
   "llmGatewayCopilotProxy.proxyToken": "<proxy-token>",
-  "llmGatewayCopilotProxy.enableGatewayAuth": true
+  "llmGatewayCopilotProxy.enableGatewayAuth": true,
+  "llmGatewayCopilotProxy.modelPrefix": "copilot-"
 }
 ```
 
@@ -164,7 +168,7 @@ code --install-extension packages/vscode-extension/dist/llm-gateway-copilot-prox
 curl http://localhost:3000/v1/models
 ```
 
-Connected Copilot models appear with `copilot-` IDs and `source: "copilot-proxy"` metadata. Use one of those IDs in normal gateway requests:
+Connected Copilot models appear with `copilot-` IDs and `source` metadata matching the registering prefix (e.g., `"copilot-"` for the default prefix). Use one of those IDs in normal gateway requests:
 
 ```bash
 curl http://localhost:3000/v1/responses \
@@ -175,6 +179,46 @@ curl http://localhost:3000/v1/responses \
     "instructions": "Reply in one sentence.",
     "input": "Explain what this gateway does."
   }'
+```
+
+#### Configurable model prefixes
+
+By default, all Copilot models are registered with the `copilot-` prefix. You can configure additional allowed prefixes in `gateway.config.yaml`:
+
+```yaml
+copilot_proxy_allowed_prefixes:
+  - copilot-
+  - alazyer-
+```
+
+Then configure the VS Code extension to use a specific prefix:
+
+```json
+{
+  "llmGatewayCopilotProxy.modelPrefix": "alazyer-"
+}
+```
+
+Models will appear with IDs like `alazyer-gpt-4o` and `source: "alazyer-"`. This allows multiple teams or extensions to register distinct model namespaces on the same gateway.
+
+Extensions registering models with a prefix not on the allowlist are rejected with WebSocket close code `1008`.
+
+#### Channel management endpoint
+
+When the Copilot proxy is enabled and gateway auth is configured, `GET /api/channels` returns information about active prefixes and their connections:
+
+```bash
+curl http://localhost:3000/api/channels \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Response:
+
+```json
+[
+  { "prefix": "alazyer-", "connectionCount": 1, "modelIds": ["alazyer-gpt-4o"] },
+  { "prefix": "copilot-", "connectionCount": 2, "modelIds": ["copilot-gpt-4o", "copilot-claude-3-5-sonnet"] }
+]
 ```
 
 OpenAI-compatible clients can use the same `copilot-*` model IDs through `/v1/chat/completions`:

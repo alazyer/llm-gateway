@@ -12,6 +12,12 @@ export interface RegisteredCopilotProxyModel extends CopilotProxyModel {
   created: number;
 }
 
+export interface ChannelInfo {
+  prefix: string;
+  connectionCount: number;
+  modelIds: string[];
+}
+
 interface CopilotProxyConnection {
   id: string;
   status: "healthy" | "unhealthy" | "closing";
@@ -87,19 +93,33 @@ class AsyncMessageQueue<T> implements AsyncIterable<T> {
   }
 }
 
-function assertValidModel(model: CopilotProxyModel): void {
-  if (!model.id.startsWith("copilot-")) {
-    throw new Error(`Copilot proxy model id \`${model.id}\` must use the copilot- prefix.`);
+export function findMatchingPrefix(modelId: string, allowedPrefixes: readonly string[]): string | undefined {
+  return allowedPrefixes.find((prefix) => modelId.startsWith(prefix));
+}
+
+function assertValidModel(model: CopilotProxyModel, allowedPrefixes: readonly string[]): void {
+  const matchingPrefix = findMatchingPrefix(model.id, allowedPrefixes);
+  if (!matchingPrefix) {
+    throw new Error(
+      `Copilot proxy model id \`${model.id}\` does not match any allowed prefix: [${allowedPrefixes.join(", ")}].`,
+    );
   }
 
-  if (model.source !== "copilot-proxy") {
-    throw new Error(`Copilot proxy model \`${model.id}\` must use source copilot-proxy.`);
+  if (model.source !== matchingPrefix) {
+    throw new Error(
+      `Copilot proxy model \`${model.id}\` must use source \`${matchingPrefix}\` (got \`${model.source}\`).`,
+    );
   }
 }
 
 export class CopilotProxyConnectionRegistry {
   private readonly connections = new Map<string, CopilotProxyConnection>();
   private readonly pendingRequests = new Map<string, PendingCopilotProxyRequest>();
+  private readonly allowedPrefixes: readonly string[];
+
+  public constructor(allowedPrefixes: readonly string[] = ["copilot-"]) {
+    this.allowedPrefixes = allowedPrefixes;
+  }
 
   public addConnection(
     connectionId: string,
@@ -167,7 +187,7 @@ export class CopilotProxyConnectionRegistry {
 
     const replacement = new Map<string, CopilotProxyModel>();
     for (const model of models) {
-      assertValidModel(model);
+      assertValidModel(model, this.allowedPrefixes);
       replacement.set(model.id, model);
     }
 
@@ -278,6 +298,44 @@ export class CopilotProxyConnectionRegistry {
     }
 
     return true;
+  }
+
+  public getChannelsInfo(): ChannelInfo[] {
+    const prefixMap = new Map<string, { connectionCount: number; modelIds: Set<string> }>();
+
+    for (const prefix of this.allowedPrefixes) {
+      prefixMap.set(prefix, { connectionCount: 0, modelIds: new Set() });
+    }
+
+    for (const connection of this.connections.values()) {
+      if (connection.status !== "healthy") {
+        continue;
+      }
+
+      const connectionPrefixes = new Set<string>();
+      for (const model of connection.models.values()) {
+        const matchingPrefix = findMatchingPrefix(model.id, this.allowedPrefixes);
+        if (matchingPrefix) {
+          connectionPrefixes.add(matchingPrefix);
+          prefixMap.get(matchingPrefix)?.modelIds.add(model.id);
+        }
+      }
+
+      for (const prefix of connectionPrefixes) {
+        const entry = prefixMap.get(prefix);
+        if (entry) {
+          entry.connectionCount += 1;
+        }
+      }
+    }
+
+    return [...prefixMap.entries()]
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([prefix, info]) => ({
+        prefix,
+        connectionCount: info.connectionCount,
+        modelIds: [...info.modelIds].sort(),
+      }));
   }
 
   private completePendingRequest(requestId: string): void {

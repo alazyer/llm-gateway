@@ -15,7 +15,7 @@ const validRegister: CopilotProxyRegisterMessage = {
       id: "copilot-gpt-4o",
       name: "GPT-4o via Copilot",
       native_id: "gpt-4o",
-      source: "copilot-proxy",
+      source: "copilot-",
       capabilities: {
         supports_streaming: true,
         supports_tools: false,
@@ -67,9 +67,10 @@ const validExtensionMessages: CopilotProxyExtensionMessage[] = [
   },
 ];
 
-const invalidModelPrefix: CopilotProxyRequestMessage = {
+const unprefixedModelId: CopilotProxyRequestMessage = {
   ...validRequest,
-  // @ts-expect-error Copilot proxy public model IDs must use the copilot- prefix.
+  // With model: string, unprefixed IDs are valid at compile time.
+  // Runtime validation in the gateway's assertValidModel enforces prefix constraints.
   model: "gpt-4o",
 };
 
@@ -85,5 +86,5 @@ const invalidTextContent: CopilotProxyTextDeltaMessage = {
 
 void validRequest;
 void validExtensionMessages;
-void invalidModelPrefix;
+void unprefixedModelId;
 void invalidTextContent;

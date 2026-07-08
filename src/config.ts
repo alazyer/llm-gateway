@@ -62,6 +62,7 @@ const yamlGatewaySchema = z.object({
   copilot_proxy_heartbeat_interval_ms: z.coerce.number().int().positive().default(30000),
   copilot_proxy_heartbeat_timeout_ms: z.coerce.number().int().positive().default(10000),
   copilot_proxy_max_inflight_per_connection: z.coerce.number().int().positive().default(4),
+  copilot_proxy_allowed_prefixes: z.array(z.string().trim().min(1)).default(["copilot-"]),
   models: z.array(yamlModelSchema).min(1),
 });
 
@@ -101,6 +102,7 @@ export interface CopilotProxyConfig {
   heartbeatIntervalMs: number;
   heartbeatTimeoutMs: number;
   maxInflightPerConnection: number;
+  allowedPrefixes: string[];
 }
 
 export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
@@ -110,6 +112,7 @@ export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
   heartbeatIntervalMs: 30000,
   heartbeatTimeoutMs: 10000,
   maxInflightPerConnection: 4,
+  allowedPrefixes: ["copilot-"],
 };
 
 type YamlModelConfig = z.infer<typeof yamlModelSchema>;
@@ -198,6 +201,7 @@ function loadYamlConfig(
       heartbeatIntervalMs: parsed.copilot_proxy_heartbeat_interval_ms,
       heartbeatTimeoutMs: parsed.copilot_proxy_heartbeat_timeout_ms,
       maxInflightPerConnection: parsed.copilot_proxy_max_inflight_per_connection,
+      allowedPrefixes: parsed.copilot_proxy_allowed_prefixes,
     },
   };
 

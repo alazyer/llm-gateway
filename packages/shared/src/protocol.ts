@@ -1,6 +1,6 @@
 export const COPILOT_PROXY_PROTOCOL_VERSION = "2026-06-26" as const;
 
-export type CopilotProxySource = "copilot-proxy";
+export type CopilotProxySource = string;
 
 export type CopilotStatus = "connected" | "disconnected" | "error";
 
@@ -19,7 +19,7 @@ export interface CopilotProxyModelCapabilities {
 }
 
 export interface CopilotProxyModel {
-  id: `copilot-${string}`;
+  id: string;
   name: string;
   native_id: string;
   source: CopilotProxySource;
@@ -119,7 +119,7 @@ export interface CopilotProxyTokenClaims {
 export interface CopilotProxyRequestMessage {
   type: "request";
   id: string;
-  model: `copilot-${string}`;
+  model: string;
   messages: CopilotProxyChatMessage[];
   params?: CopilotProxyRequestParams;
   tools?: CopilotProxyTool[];
