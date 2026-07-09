@@ -5,7 +5,7 @@ import type {
   CopilotProxyStatusUpdateMessage,
 } from "@llm-gateway/shared";
 
-import { isExtensionConfigComplete, loadExtensionConfig } from "./config.js";
+import { getChangedSettings, isExtensionConfigComplete, loadExtensionConfig, type ExtensionConfig } from "./config.js";
 import { CopilotBridge } from "./copilot-bridge.js";
 import { ExtensionLogger } from "./logger.js";
 import { StatusBarController } from "./status-bar.js";
@@ -15,6 +15,7 @@ interface RuntimeState {
   logger: ExtensionLogger;
   statusBar: StatusBarController;
   client?: CopilotProxyWebSocketClient;
+  config?: ExtensionConfig;
   disposables: vscode.Disposable[];
 }
 
@@ -44,6 +45,35 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(...disposables);
   runtime = { logger, statusBar, disposables };
 
+  // Register configuration change listener
+  const configChangeListener = vscode.workspace.onDidChangeConfiguration(() => {
+    if (!runtime) {
+      return;
+    }
+    const oldConfig = runtime.config;
+    if (!oldConfig) {
+      return;
+    }
+    const newConfig = loadExtensionConfig();
+    const changes = getChangedSettings(oldConfig, newConfig);
+
+    if (changes.changedKeys.length > 0) {
+      logger.info(`Configuration changed: ${changes.changedKeys.join(", ")}.`);
+
+      // Update logLevel immediately without reconnect
+      if (changes.changedKeys.includes("logLevel")) {
+        logger.setLevel(newConfig.logLevel);
+      }
+
+      // Reconnect if required settings changed
+      if (changes.requiresReconnect) {
+        logger.info("Reconnecting due to configuration change.");
+        startProxy(logger, statusBar);
+      }
+    }
+  });
+  disposables.push(configChangeListener);
+
   logger.info("Extension activated.");
   startProxy(logger, statusBar);
 }
@@ -65,6 +95,12 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
       config.proxyToken ? "configured" : "<missing>"
     }, enableGatewayAuth=${config.enableGatewayAuth}, modelPrefix=${config.modelPrefix}, reconnectInitialDelayMs=${config.reconnectInitialDelayMs}, reconnectMaxDelayMs=${config.reconnectMaxDelayMs}, logLevel=${config.logLevel}.`,
   );
+
+  // Store config for change detection
+  if (runtime) {
+    runtime.config = config;
+  }
+
   if (!isExtensionConfigComplete(config)) {
     const missing = [
       config.gatewayUrl ? undefined : "gatewayUrl",
@@ -143,9 +179,9 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
     cancelHandler: (id) => bridge.cancel(id),
     onPolicyViolation: (reason) => {
       vscode.window.showErrorMessage(
-        `LLM Gateway: The model prefix "${config.modelPrefix}" is not in the gateway allowlist. ` +
-        `Update the "llmGatewayCopilotProxy.modelPrefix" setting to use an allowed prefix, ` +
-        `or ask your gateway operator to add "${config.modelPrefix}" to the allowed prefixes. ` +
+        `LLM Gateway: The model prefix "${config.modelPrefix}" is not allowed by the gateway. ` +
+        `Update the extension's "llmGatewayCopilotProxy.modelPrefix" setting to use an allowed prefix, ` +
+        `or add "${config.modelPrefix}" to the gateway's \`copilot_proxy_allowed_prefixes\` list in gateway.yaml. ` +
         (reason ? `Gateway reason: ${reason}` : "").trim(),
       );
     },

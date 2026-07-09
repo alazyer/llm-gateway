@@ -43,3 +43,37 @@ export function isExtensionConfigComplete(config: ExtensionConfig): boolean {
     (!config.enableGatewayAuth || config.proxyToken.length > 0)
   );
 }
+
+const RECONNECT_REQUIRED_KEYS = new Set([
+  "gatewayUrl",
+  "proxyToken",
+  "enableGatewayAuth",
+  "modelPrefix",
+]);
+
+export function getChangedSettings(
+  oldConfig: ExtensionConfig,
+  newConfig: ExtensionConfig,
+): { changedKeys: string[]; requiresReconnect: boolean } {
+  const allKeys: (keyof ExtensionConfig)[] = [
+    "gatewayUrl",
+    "proxyToken",
+    "enableGatewayAuth",
+    "modelPrefix",
+    "reconnectInitialDelayMs",
+    "reconnectMaxDelayMs",
+    "logLevel",
+  ];
+
+  const changedKeys: string[] = [];
+
+  for (const key of allKeys) {
+    if (oldConfig[key] !== newConfig[key]) {
+      changedKeys.push(key);
+    }
+  }
+
+  const requiresReconnect = changedKeys.some((key) => RECONNECT_REQUIRED_KEYS.has(key));
+
+  return { changedKeys, requiresReconnect };
+}
