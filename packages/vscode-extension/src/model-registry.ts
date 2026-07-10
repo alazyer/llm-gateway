@@ -52,7 +52,12 @@ export function toGatewayModel(model: vscode.LanguageModelChat, modelPrefix: str
       supports_tools: supportsTools,
       supports_usage: false,
       supports_progress: false,
-      max_tokens: model.maxInputTokens,
+      // Omit max_tokens when the model reports a non-finite value (Infinity/NaN).
+      // JSON.stringify converts Infinity/NaN to null, which the gateway rejects,
+      // so we must not include it at all — undefined is stripped by JSON.stringify.
+      ...(typeof model.maxInputTokens === "number" && Number.isFinite(model.maxInputTokens) && model.maxInputTokens > 0
+        ? { max_tokens: model.maxInputTokens }
+        : {}),
     },
   };
 }

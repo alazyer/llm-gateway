@@ -52,4 +52,32 @@ describe("toGatewayModel", () => {
     const model = toGatewayModel(makeModel({ id: "GPT-4o" }), "copilot-");
     expect(model.native_id).toBe("GPT-4o");
   });
+
+  it("includes max_tokens when model.maxInputTokens is a finite positive number", () => {
+    const model = toGatewayModel(makeModel({ maxInputTokens: 128000 }), "copilot-");
+    expect(model.capabilities.max_tokens).toBe(128000);
+  });
+
+  it("omits max_tokens when model.maxInputTokens is Infinity", () => {
+    const model = toGatewayModel(makeModel({ maxInputTokens: Infinity }), "copilot-");
+    expect(model.capabilities.max_tokens).toBeUndefined();
+    // Verify the serialized form doesn't contain null (which the gateway would reject)
+    const serialized = JSON.parse(JSON.stringify(model));
+    expect(serialized.capabilities.max_tokens).toBeUndefined();
+  });
+
+  it("omits max_tokens when model.maxInputTokens is NaN", () => {
+    const model = toGatewayModel(makeModel({ maxInputTokens: NaN }), "copilot-");
+    expect(model.capabilities.max_tokens).toBeUndefined();
+  });
+
+  it("omits max_tokens when model.maxInputTokens is zero", () => {
+    const model = toGatewayModel(makeModel({ maxInputTokens: 0 }), "copilot-");
+    expect(model.capabilities.max_tokens).toBeUndefined();
+  });
+
+  it("omits max_tokens when model.maxInputTokens is negative", () => {
+    const model = toGatewayModel(makeModel({ maxInputTokens: -1 }), "copilot-");
+    expect(model.capabilities.max_tokens).toBeUndefined();
+  });
 });

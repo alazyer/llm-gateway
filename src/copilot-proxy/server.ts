@@ -15,6 +15,7 @@ import {
   type CopilotProxyTokenStore,
 } from "./auth.js";
 import { CopilotProxyConnectionRegistry } from "./registry.js";
+import { validateExtensionMessage } from "./validation.js";
 
 interface RegisterCopilotProxyWebsocketOptions {
   config: CopilotProxyConfig;
@@ -49,7 +50,7 @@ function isModelCapabilities(value: unknown): value is CopilotProxyModel["capabi
     typeof value.supports_tools === "boolean" &&
     typeof value.supports_usage === "boolean" &&
     typeof value.supports_progress === "boolean" &&
-    (value.max_tokens === undefined || typeof value.max_tokens === "number") &&
+    (value.max_tokens === undefined || value.max_tokens === null || typeof value.max_tokens === "number") &&
     (value.concurrent_requests === undefined || typeof value.concurrent_requests === "number")
   );
 }
@@ -198,7 +199,11 @@ export function registerCopilotProxyWebsocket(
       }
 
       if (!isExtensionMessage(parsed)) {
-        request.log.warn({ connectionId }, "Received invalid Copilot proxy protocol frame.");
+        const validationError = validateExtensionMessage(parsed);
+        request.log.warn(
+          { connectionId, parsed, validationError },
+          "Received invalid Copilot proxy protocol frame.",
+        );
         socket.close(1003, "Invalid protocol frame.");
         return;
       }

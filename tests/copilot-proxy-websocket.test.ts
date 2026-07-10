@@ -284,6 +284,37 @@ describe("Copilot proxy WebSocket", () => {
     }
   });
 
+  it("accepts model registrations with null max_tokens (Infinity serialized through JSON)", async () => {
+    const app = createApp({ config });
+
+    try {
+      await app.ready();
+      const token = await issueProxyToken(app);
+      const ws = await app.injectWS(`/ws/copilot-proxy?token=${encodeURIComponent(token)}`);
+
+      // Simulate a model whose maxInputTokens was Infinity:
+      // JSON.stringify(Infinity) → null, so the gateway must accept null.
+      ws.send(
+        JSON.stringify({
+          type: "register",
+          extension_version: "0.1.0",
+          copilot_status: "connected",
+          models: [
+            {
+              ...copilotModel,
+              capabilities: { ...copilotModel.capabilities, max_tokens: null },
+            },
+          ],
+        }),
+      );
+
+      await waitForModel(app, "copilot-gpt-4o", true);
+      ws.close();
+    } finally {
+      await app.close();
+    }
+  });
+
   it("preserves direct and Copilot-backed model records when native names collide", async () => {
     const app = createApp({
       config: {
