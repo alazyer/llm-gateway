@@ -96,8 +96,12 @@ describe("buildChatCompletionRequestFromAnthropic", () => {
         },
         {
           role: "user",
-          content:
-            'Tool returned:\n<tool_result tool_use_id="toolu_1">\nSunny\n</tool_result>',
+          content: "Tool returned:",
+        },
+        {
+          role: "tool",
+          tool_call_id: "toolu_1",
+          content: "Sunny",
         },
       ],
       max_completion_tokens: 256,
@@ -159,12 +163,143 @@ describe("buildChatCompletionRequestFromAnthropic", () => {
       model: "claude-sonnet-4-5",
       messages: [
         {
-          role: "user",
-          content:
-            '<tool_result tool_use_id="toolu_1" is_error="true">\nnot found\n</tool_result>',
+          role: "tool",
+          tool_call_id: "toolu_1",
+          content: "not found",
         },
       ],
       tool_choice: "required",
+    });
+  });
+
+  it("emits separate tool messages for multiple tool_results in one user message", () => {
+    expect(
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_1",
+                name: "get_weather",
+                input: { city: "Paris" },
+              },
+              {
+                type: "tool_use",
+                id: "toolu_2",
+                name: "get_weather",
+                input: { city: "London" },
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+                content: "Sunny",
+              },
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_2",
+                content: "Rainy",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      model: "claude-sonnet-4-5",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "toolu_1",
+              type: "function",
+              function: {
+                name: "get_weather",
+                arguments: '{"city":"Paris"}',
+              },
+            },
+            {
+              id: "toolu_2",
+              type: "function",
+              function: {
+                name: "get_weather",
+                arguments: '{"city":"London"}',
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "toolu_1",
+          content: "Sunny",
+        },
+        {
+          role: "tool",
+          tool_call_id: "toolu_2",
+          content: "Rainy",
+        },
+      ],
+    });
+  });
+
+  it("handles tool_result with no content by using empty string", () => {
+    expect(
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_1",
+                name: "do_something",
+                input: {},
+              },
+            ],
+          },
+          {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_1",
+              },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      model: "claude-sonnet-4-5",
+      messages: [
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "toolu_1",
+              type: "function",
+              function: {
+                name: "do_something",
+                arguments: "{}",
+              },
+            },
+          ],
+        },
+        {
+          role: "tool",
+          tool_call_id: "toolu_1",
+          content: "",
+        },
+      ],
     });
   });
 

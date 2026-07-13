@@ -96,8 +96,9 @@ describe("buildChatCompletionRequestFromAnthropic", () => {
           ],
         },
         {
-          role: "user",
-          content: '<tool_result tool_use_id="toolu_1">\n/repo\n</tool_result>',
+          role: "tool",
+          tool_call_id: "toolu_1",
+          content: "/repo",
         },
         {
           role: "user",

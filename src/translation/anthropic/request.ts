@@ -73,23 +73,6 @@ function normalizeToolResultContent(
   return text;
 }
 
-function formatToolResultForUserMessage(
-  block: AnthropicToolResultBlock,
-  context: string,
-): string {
-  const attributes = [`tool_use_id="${block.tool_use_id}"`];
-  if (block.is_error) {
-    attributes.push('is_error="true"');
-  }
-
-  const content = normalizeToolResultContent(block, context);
-  if (content.length === 0) {
-    return `<tool_result ${attributes.join(" ")}></tool_result>`;
-  }
-
-  return `<tool_result ${attributes.join(" ")}>\n${content}\n</tool_result>`;
-}
-
 function normalizeToolUseBlock(
   value: unknown,
   context: string,
@@ -257,9 +240,12 @@ function normalizeUserMessage(
         textParts.push(block.text);
         break;
       case "tool_result":
-        textParts.push(
-          formatToolResultForUserMessage(block, `${context}.content[${index}]`),
-        );
+        flushText();
+        translated.push({
+          role: "tool",
+          tool_call_id: block.tool_use_id,
+          content: normalizeToolResultContent(block, `${context}.content[${index}]`),
+        });
         break;
       case "tool_use":
         throw new Error(
