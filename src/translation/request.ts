@@ -363,5 +363,9 @@ export function buildChatCompletionRequest(
     payload.tool_choice = normalizeToolChoice(request.tool_choice);
   }
 
+  if (request.parallel_tool_calls !== undefined) {
+    payload.parallel_tool_calls = expectBoolean(request.parallel_tool_calls, "parallel_tool_calls");
+  }
+
   return payload;
 }

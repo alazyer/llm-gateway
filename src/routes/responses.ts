@@ -63,6 +63,12 @@ const requestBodySchema = z
     user: z.string().optional(),
     tools: z.array(z.unknown()).optional(),
     tool_choice: z.unknown().optional(),
+    client_metadata: z.record(z.string(), z.unknown()).optional(),
+    include: z.array(z.string()).optional(),
+    parallel_tool_calls: z.boolean().optional(),
+    prompt_cache_key: z.string().optional(),
+    reasoning: z.object({ effort: z.string().optional() }).passthrough().nullable().optional(),
+    store: z.boolean().optional(),
   })
   .passthrough();
 
@@ -78,6 +84,12 @@ const RESPONSES_ALLOWED_TOP_LEVEL_FIELDS = new Set([
   "user",
   "tools",
   "tool_choice",
+  "client_metadata",
+  "include",
+  "parallel_tool_calls",
+  "prompt_cache_key",
+  "reasoning",
+  "store",
 ]);
 
 interface ModelRecord {
@@ -793,6 +805,10 @@ function parseResponseRequest(body: unknown): ParsedResponseRequest {
     ) {
       normalized.tool_choice = tc as import("../contracts.js").ResponsesToolChoice;
     }
+  }
+
+  if (parsed.data.parallel_tool_calls !== undefined) {
+    normalized.parallel_tool_calls = parsed.data.parallel_tool_calls;
   }
 
   return normalized;

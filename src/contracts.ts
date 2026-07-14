@@ -58,6 +58,12 @@ export interface ResponseRequest {
   user?: string;
   tools?: ResponsesTool[];
   tool_choice?: ResponsesToolChoice;
+  client_metadata?: Record<string, unknown>;
+  include?: string[];
+  parallel_tool_calls?: boolean;
+  prompt_cache_key?: string;
+  reasoning?: { effort?: string; [key: string]: unknown };
+  store?: boolean;
 }
 
 export interface ChatMessage {
@@ -120,6 +126,7 @@ export interface ChatCompletionRequest {
   stop?: string[];
   tools?: ChatTool[];
   tool_choice?: ChatToolChoice;
+  parallel_tool_calls?: boolean;
 }
 
 export interface ChatCompletionChoice {

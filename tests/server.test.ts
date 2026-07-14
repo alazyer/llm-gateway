@@ -507,6 +507,123 @@ describe("createApp", () => {
     }
   });
 
+  it("accepts Codex / Responses API fields without flagging them as unknown in enforce mode", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl_codex",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "glm-5.1",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "Hello from Codex",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            unknownFieldMode: "enforce",
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          client_metadata: { session: "abc" },
+          include: ["file_search_call.results"],
+          parallel_tool_calls: true,
+          prompt_cache_key: "cache-key-123",
+          reasoning: { effort: "high" },
+          store: true,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("accepts reasoning: null in /responses request", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl_null_reasoning",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "glm-5.1",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: {
+                role: "assistant",
+                content: "Hello",
+              },
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        },
+      ),
+    );
+
+    const app = createApp({
+      config: {
+        ...singleModelConfig,
+        models: [
+          {
+            ...singleModelConfig.models[0]!,
+            unknownFieldMode: "enforce",
+          },
+        ],
+      },
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: {
+          input: "Hello gateway",
+          reasoning: null,
+        },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("ignores unknown /responses top-level fields in warn mode", async () => {
     const fetchMock = vi.fn(async () =>
       new Response(
