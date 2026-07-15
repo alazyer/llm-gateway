@@ -481,4 +481,378 @@ models:
       rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // Chain config validation tests
+  // ---------------------------------------------------------------------------
+
+  const chainBaseEnv = {
+    HOST: "127.0.0.1",
+    PORT: "4000",
+    GLM_API_KEY: "api-key-a",
+    GPT_API_KEY: "api-key-b",
+  };
+
+  const twoModelsYaml = `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+`;
+
+  describe("chain config validation", () => {
+    it("parses valid chain config successfully", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath });
+
+        expect(config.modelChains).toHaveLength(1);
+        const chain = config.modelChains![0]!;
+        expect(chain.name).toBe("production");
+        expect(chain.models).toHaveLength(2);
+        expect(chain.models[0]!.name).toBe("gpt-5");
+        expect(chain.models[1]!.name).toBe("glm-5.1");
+        expect(chain.timeoutMs).toBe(30000); // gateway default
+        expect(chain.maxRetries).toBe(0); // gateway default
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects chain with non-existent model reference with startup validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - nonexistent-model
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/not present in the configured model catalog/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects chain name matching a model name with startup validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: glm-5.1
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/Chain name "glm-5\.1" conflicts with a configured model name/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects chain-<name> matching a model name with startup validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `models:
+  - name: chain-fallback
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+model_chains:
+  - name: fallback
+    models:
+      - gpt-5
+`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/Chain identifier "chain-fallback" conflicts with a configured model name/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects duplicate chain names with startup validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+  - name: production
+    models:
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/Duplicate chain name "production"/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects chain referencing chain-<name> in models list with startup validation error (nesting)", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+  - name: fallback
+    models:
+      - chain-production
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/Chain nesting is not supported/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects chain referencing copilot-prefixed model with startup validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `models:
+  - name: copilot-gpt-4o
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+model_chains:
+  - name: production
+    models:
+      - copilot-gpt-4o
+`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/Copilot-proxied models cannot be used in chains/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects empty models list with Zod validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models: []
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError();
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects empty chain name with Zod validation error", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: ""
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError();
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts config with optional model_chains section omitted (backward compatible)", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(configPath, twoModelsYaml, "utf8");
+
+      try {
+        const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath });
+
+        expect(config.modelChains).toEqual([]);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts config with empty model_chains array", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `model_chains: []
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath });
+
+        expect(config.modelChains).toEqual([]);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts default_model set to chain-<name> when chain exists", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `default_model: chain-production
+model_chains:
+  - name: production
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath });
+
+        expect(config.defaultModel).toBe("chain-production");
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects default_model set to chain-<name> when chain does not exist", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `default_model: chain-nonexistent
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath }),
+        ).toThrowError(/not present in the configured model catalog or model chains/);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it("resolves per-model overrides correctly in AppConfig output", () => {
+      const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+      const configPath = join(tempDir, "gateway.config.yaml");
+
+      writeFileSync(
+        configPath,
+        `request_timeout_ms: 15000
+max_retries: 0
+model_chains:
+  - name: production
+    timeout_ms: 45000
+    max_retries: 1
+    models:
+      - name: gpt-5
+        timeout_ms: 60000
+        max_retries: 3
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+      try {
+        const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath });
+
+        const chain = config.modelChains![0]!;
+        // Model override wins over chain default
+        expect(chain.models[0]!.timeoutMs).toBe(60000);
+        expect(chain.models[0]!.maxRetries).toBe(3);
+        // Chain default wins over gateway default
+        expect(chain.models[1]!.timeoutMs).toBe(45000);
+        expect(chain.models[1]!.maxRetries).toBe(1);
+        // Chain-level settings
+        expect(chain.timeoutMs).toBe(45000);
+        expect(chain.maxRetries).toBe(1);
+      } finally {
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+  });
 });
