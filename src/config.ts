@@ -5,6 +5,8 @@ import { config as loadDotenv } from "dotenv";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
+import type { ChainModelEntry, ModelChainConfig } from "./contracts.js";
+
 loadDotenv();
 
 const envSchema = z.object({
@@ -48,6 +50,23 @@ const yamlModelSchema = z
     }
   });
 
+const yamlChainModelEntrySchema = z.union([
+  z.string().trim().min(1),
+  z.object({
+    name: z.string().trim().min(1),
+    timeout_ms: z.number().positive().optional(),
+    max_retries: z.number().nonnegative().optional(),
+  }),
+]);
+
+const yamlModelChainEntrySchema = z.object({
+  name: z.string().min(1),
+  models: z.array(yamlChainModelEntrySchema).min(1),
+  timeout_ms: z.number().positive().optional(),
+  max_retries: z.number().nonnegative().optional(),
+  chain_timeout_ms: z.number().positive().optional(),
+});
+
 const yamlGatewaySchema = z.object({
   default_model: z.string().trim().min(1).optional(),
   request_timeout_ms: z.coerce.number().int().positive().default(30000),
@@ -64,6 +83,7 @@ const yamlGatewaySchema = z.object({
   copilot_proxy_max_inflight_per_connection: z.coerce.number().int().positive().default(4),
   copilot_proxy_allowed_prefixes: z.array(z.string().trim().min(1)).default(["copilot-"]),
   models: z.array(yamlModelSchema).min(1),
+  model_chains: z.array(yamlModelChainEntrySchema).optional(),
 });
 
 export interface GatewayModelConfig {
@@ -93,6 +113,7 @@ export interface AppConfig {
   corsOrigin?: string | string[];
   copilotProxy?: CopilotProxyConfig;
   models: GatewayModelConfig[];
+  modelChains?: ModelChainConfig[];
 }
 
 export interface CopilotProxyConfig {
@@ -116,6 +137,8 @@ export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
 };
 
 type YamlModelConfig = z.infer<typeof yamlModelSchema>;
+type YamlChainModelEntry = z.infer<typeof yamlChainModelEntrySchema>;
+type YamlModelChainEntry = z.infer<typeof yamlModelChainEntrySchema>;
 
 function getCurrentTimestamp(): number {
   return Math.floor(Date.now() / 1000);
@@ -151,10 +174,93 @@ function normalizeModelEntry(
   };
 }
 
+function resolveChainModelRef(
+  ref: YamlChainModelEntry,
+  modelsByName: Map<string, GatewayModelConfig>,
+  chainTimeoutMs: number | undefined,
+  chainMaxRetries: number | undefined,
+  gatewayTimeoutMs: number,
+  gatewayMaxRetries: number,
+): ChainModelEntry {
+  const name = typeof ref === "string" ? ref : ref.name;
+  const modelConfig = modelsByName.get(name);
+
+  if (!modelConfig) {
+    throw new Error(
+      `Model "${name}" referenced in a chain is not present in the configured model catalog.`,
+    );
+  }
+
+  const modelOverride = typeof ref === "object" ? ref : undefined;
+  const timeoutMs = modelOverride?.timeout_ms ?? chainTimeoutMs ?? gatewayTimeoutMs;
+  const maxRetries = modelOverride?.max_retries ?? chainMaxRetries ?? gatewayMaxRetries;
+
+  return { name, modelConfig, timeoutMs, maxRetries };
+}
+
+function validateModelChains(
+  chains: YamlModelChainEntry[],
+  modelNames: Set<string>,
+  copilotPrefixes: string[],
+): void {
+  const chainNames = new Set<string>();
+
+  for (const chain of chains) {
+    // No duplicate chain names
+    if (chainNames.has(chain.name)) {
+      throw new Error(
+        `Duplicate chain name "${chain.name}" in model_chains. Chain names must be unique.`,
+      );
+    }
+    chainNames.add(chain.name);
+
+    // No chain name matching a model name
+    if (modelNames.has(chain.name)) {
+      throw new Error(
+        `Chain name "${chain.name}" conflicts with a configured model name. Chain names must not match any model name in the catalog.`,
+      );
+    }
+
+    // No chain-<name> matching a model name
+    const chainIdentifier = `chain-${chain.name}`;
+    if (modelNames.has(chainIdentifier)) {
+      throw new Error(
+        `Chain identifier "${chainIdentifier}" conflicts with a configured model name. The chain name "${chain.name}" would produce a "chain-${chain.name}" identifier that matches an existing model.`,
+      );
+    }
+
+    // Validate each model reference in the chain
+    for (const ref of chain.models) {
+      const name = typeof ref === "string" ? ref : ref.name;
+
+      // No chain nesting: model references must not start with "chain-"
+      if (name.startsWith("chain-")) {
+        throw new Error(
+          `Model reference "${name}" in chain "${chain.name}" starts with "chain-". Chain nesting is not supported.`,
+        );
+      }
+
+      // No copilot-proxy models in chains
+      if (copilotPrefixes.some((prefix) => name.startsWith(prefix))) {
+        throw new Error(
+          `Model reference "${name}" in chain "${chain.name}" uses a Copilot-proxy prefix. Copilot-proxied models cannot be used in chains.`,
+        );
+      }
+
+      // All model references must exist in the models catalog
+      if (!modelNames.has(name)) {
+        throw new Error(
+          `Model "${name}" referenced in chain "${chain.name}" is not present in the configured model catalog.`,
+        );
+      }
+    }
+  }
+}
+
 function loadYamlConfig(
   configPath: string,
   env: NodeJS.ProcessEnv,
-): { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } {
+): { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } {
   let rawContent: string;
   try {
     rawContent = readFileSync(resolve(configPath), "utf8");
@@ -181,14 +287,52 @@ function loadYamlConfig(
   const models = parsed.models.map((model) => normalizeModelEntry(model, env));
   const defaultModel = parsed.default_model;
 
-  if (defaultModel && !models.some((model) => model.name === defaultModel)) {
-    throw new Error(
-      `default_model ${defaultModel} is not present in the configured model catalog.`,
-    );
+  // Build lookup structures for cross-field validation
+  const modelNames = new Set(models.map((m) => m.name));
+  const modelsByName = new Map(models.map((m) => [m.name, m]));
+
+  // Validate model_chains cross-field rules
+  const rawChains = parsed.model_chains ?? [];
+  validateModelChains(rawChains, modelNames, parsed.copilot_proxy_allowed_prefixes);
+
+  // Support chain-<name> as a valid default_model value
+  const chainNames = new Set(rawChains.map((c) => c.name));
+  if (defaultModel) {
+    const isPlainModel = modelNames.has(defaultModel);
+    const isChainRef = defaultModel.startsWith("chain-") && chainNames.has(defaultModel.slice("chain-".length));
+    if (!isPlainModel && !isChainRef) {
+      throw new Error(
+        `default_model "${defaultModel}" is not present in the configured model catalog or model chains.`,
+      );
+    }
   }
 
-  const config: { models: GatewayModelConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } = {
+  // Resolve chain entries to full ModelChainConfig objects
+  const modelChains: ModelChainConfig[] = rawChains.map((chain) => {
+    const result: ModelChainConfig = {
+      name: chain.name,
+      models: chain.models.map((ref) =>
+        resolveChainModelRef(
+          ref,
+          modelsByName,
+          chain.timeout_ms,
+          chain.max_retries,
+          parsed.request_timeout_ms,
+          parsed.max_retries,
+        ),
+      ),
+      timeoutMs: chain.timeout_ms ?? parsed.request_timeout_ms,
+      maxRetries: chain.max_retries ?? parsed.max_retries,
+    };
+    if (chain.chain_timeout_ms !== undefined) {
+      result.chainTimeoutMs = chain.chain_timeout_ms;
+    }
+    return result;
+  });
+
+  const config: { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } = {
     models,
+    modelChains,
     upstreamBaseUrl: models[0]!.baseUrl,
     requestTimeoutMs: parsed.request_timeout_ms,
     maxRetries: parsed.max_retries,
@@ -238,6 +382,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     healthProbeEnabled: configSource.healthProbeEnabled,
     copilotProxy: configSource.copilotProxy,
     models: configSource.models,
+    modelChains: configSource.modelChains,
   };
 
   if (configSource.defaultModel) {

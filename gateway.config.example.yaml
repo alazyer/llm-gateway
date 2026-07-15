@@ -70,3 +70,65 @@ models:
     supports_streaming: true
     unknown_field_mode: enforce
     unknown_field_window_requests: 100
+
+# ── Model Chains ──────────────────────────────────────────────────────────────
+# Model chains define ordered fallback groups. When a request targets a chain
+# (by setting the model field to chain-<name>), the gateway tries each model
+# in order until one succeeds. If every model fails, the last error is returned.
+#
+# name              — Chain identifier. Used as chain-<name> in the request model
+#                     field (e.g. "chain-production"). Must not match any model
+#                     name in the catalog, and chain-<name> must not collide with
+#                     a model name either. Duplicate chain names are rejected.
+#
+# models            — Ordered fallback priority list (first = highest priority).
+#                     Each entry can be a simple string matching a model name from
+#                     the models catalog, or an object with per-model overrides:
+#                       {name: <model-name>, timeout_ms: <ms>, max_retries: <n>}
+#                     String form inherits timeout/retry from the chain or gateway.
+#                     Models starting with "chain-" or any copilot-proxy prefix
+#                     are not allowed in chains (no nesting, no proxied models).
+#
+# timeout_ms        — Default per-model timeout for this chain (milliseconds).
+#                     Overrides the gateway-level request_timeout_ms. Each model
+#                     in the chain uses this value unless a per-model override
+#                     specifies otherwise.
+#                     Resolution order: model-in-chain → chain → gateway
+#
+# max_retries       — Default per-model retry count for this chain. Overrides
+#                     the gateway-level max_retries. Same 3-level resolution:
+#                     model-in-chain → chain → gateway
+#
+# chain_timeout_ms  — Total wall-clock budget for the entire chain execution
+#                     (all attempts, retries, and backoff delays). If exceeded,
+#                     the chain stops and returns HTTP 504. When absent, no
+#                     overall budget is enforced; each model is bounded only by
+#                     its individual timeout.
+#
+# To route requests to a chain, set default_model or the per-request model
+# field to chain-<name> (e.g. default_model: chain-production).
+
+# model_chains:
+#   # Simple chain: string-shorthand model entries
+#   - name: production
+#     models:
+#       - glm-5.1
+#       - coder-alias
+#
+#   # Chain with per-model overrides (object form)
+#   - name: resilient
+#     models:
+#       - name: glm-5.1
+#         timeout_ms: 60000
+#         max_retries: 2
+#       - name: coder-alias
+#         timeout_ms: 45000
+#
+#   # Chain-level timeout/retry defaults + total budget
+#   - name: slow-chain
+#     timeout_ms: 60000
+#     max_retries: 1
+#     chain_timeout_ms: 90000
+#     models:
+#       - glm-5.1
+#       - claude-sonnet-4-5

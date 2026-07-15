@@ -17,9 +17,14 @@ export interface ChatCompletionsClientOptions {
   maxRetries?: number;
 }
 
+export interface PerRequestOptions {
+  timeoutMs?: number;
+  maxRetries?: number;
+}
+
 export interface ChatCompletionsTransport {
-  createCompletion(request: ChatCompletionRequest, requestId?: string): Promise<ChatCompletionResponse>;
-  createCompletionStream(request: ChatCompletionRequest, requestId?: string): Promise<ReadableStream<Uint8Array>>;
+  createCompletion(request: ChatCompletionRequest, requestId?: string, perRequest?: PerRequestOptions): Promise<ChatCompletionResponse>;
+  createCompletionStream(request: ChatCompletionRequest, requestId?: string, perRequest?: PerRequestOptions): Promise<ReadableStream<Uint8Array>>;
 }
 
 export class UpstreamHttpError extends Error {
@@ -59,11 +64,14 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
   public async createCompletion(
     request: ChatCompletionRequest,
     requestId?: string,
+    perRequest?: PerRequestOptions,
   ): Promise<ChatCompletionResponse> {
+    const effectiveTimeoutMs = perRequest?.timeoutMs ?? this.timeoutMs;
+    const effectiveMaxRetries = perRequest?.maxRetries ?? this.maxRetries;
     const startTime = Date.now();
     let lastError: unknown;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= effectiveMaxRetries; attempt++) {
       try {
         if (attempt > 0) {
           const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
@@ -80,7 +88,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
         }
 
         const abortController = new AbortController();
-        const timeoutId = setTimeout(() => abortController.abort(), this.timeoutMs);
+        const timeoutId = setTimeout(() => abortController.abort(), effectiveTimeoutMs);
 
         try {
           const response = await this.client.chat.completions.create(
@@ -108,7 +116,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
       } catch (error) {
         lastError = error;
 
-        if (this.isRetryableError(error) && attempt < this.maxRetries) {
+        if (this.isRetryableError(error) && attempt < effectiveMaxRetries) {
           continue;
         }
 
@@ -126,7 +134,10 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
   public async createCompletionStream(
     request: ChatCompletionRequest,
     requestId?: string,
+    perRequest?: PerRequestOptions,
   ): Promise<ReadableStream<Uint8Array>> {
+    const effectiveTimeoutMs = perRequest?.timeoutMs ?? this.timeoutMs;
+    const effectiveMaxRetries = perRequest?.maxRetries ?? this.maxRetries;
     const streamingRequest: ChatCompletionRequest = {
       ...request,
       stream: true,
@@ -143,7 +154,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
 
     let lastError: unknown;
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= effectiveMaxRetries; attempt++) {
       try {
         if (attempt > 0) {
           const backoffMs = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
@@ -161,7 +172,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
         }
 
         const abortController = new AbortController();
-        const timeoutId = setTimeout(() => abortController.abort(), this.timeoutMs);
+        const timeoutId = setTimeout(() => abortController.abort(), effectiveTimeoutMs);
         const streamStartTime = Date.now();
 
         try {
@@ -193,7 +204,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
       } catch (error) {
         lastError = error;
 
-        if (this.isRetryableError(error) && attempt < this.maxRetries) {
+        if (this.isRetryableError(error) && attempt < effectiveMaxRetries) {
           continue;
         }
 
