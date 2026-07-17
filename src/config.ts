@@ -6,6 +6,22 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 
 import type { ChainModelEntry, ModelChainConfig } from "./contracts.js";
+import type {
+  ModelRow,
+  ModelChainRow,
+  ChainModelRow,
+  GatewayConfigRow,
+} from "./db/types.js";
+import { openDatabase } from "./db/index.js";
+import { runMigrations } from "./db/migrations/index.js";
+import { allMigrations } from "./db/migrations/all.js";
+import { seedFromConfig } from "./db/seed.js";
+import {
+  getAllModels,
+  getAllChains,
+  getChainModels,
+  getGatewayConfig,
+} from "./db/repository.js";
 
 loadDotenv();
 
@@ -91,12 +107,16 @@ export interface GatewayModelConfig {
   upstreamModel: string;
   baseUrl: string;
   apiKey: string;
+  apiKeyEnv: string;
   ownedBy: string;
   created: number;
   supportsTools: boolean;
   supportsStreaming: boolean;
   unknownFieldMode: "warn" | "enforce";
   unknownFieldWindowRequests: number;
+  status: string;
+  statusReason: string | null;
+  statusChangedAt: number | null;
 }
 
 export interface AppConfig {
@@ -109,6 +129,7 @@ export interface AppConfig {
   maxRetries: number;
   maxBodySizeKb: number;
   gatewayAuthToken?: string;
+  gatewayAuthTokenEnv?: string;
   healthProbeEnabled: boolean;
   corsOrigin?: string | string[];
   copilotProxy?: CopilotProxyConfig;
@@ -165,12 +186,16 @@ function normalizeModelEntry(
     upstreamModel: value.upstream_model ?? value.name,
     baseUrl: normalizeBaseUrl(value.base_url),
     apiKey,
+    apiKeyEnv: value.api_key_env!,
     ownedBy: value.owned_by,
     created: value.created ?? getCurrentTimestamp(),
     supportsTools: value.supports_tools,
     supportsStreaming: value.supports_streaming,
     unknownFieldMode: value.unknown_field_mode,
     unknownFieldWindowRequests: value.unknown_field_window_requests,
+    status: "active",
+    statusReason: "Loaded from gateway.config.yaml",
+    statusChangedAt: getCurrentTimestamp(),
   };
 }
 
@@ -260,7 +285,7 @@ function validateModelChains(
 function loadYamlConfig(
   configPath: string,
   env: NodeJS.ProcessEnv,
-): { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } {
+): { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } {
   let rawContent: string;
   try {
     rawContent = readFileSync(resolve(configPath), "utf8");
@@ -309,20 +334,36 @@ function loadYamlConfig(
 
   // Resolve chain entries to full ModelChainConfig objects
   const modelChains: ModelChainConfig[] = rawChains.map((chain) => {
+    const chainModels = chain.models.map((ref) =>
+      resolveChainModelRef(
+        ref,
+        modelsByName,
+        chain.timeout_ms,
+        chain.max_retries,
+        parsed.request_timeout_ms,
+        parsed.max_retries,
+      ),
+    );
+    const activeCount = chainModels.filter((m) => m.modelConfig.status === "active").length;
+    const totalCount = chainModels.length;
+    const chainStatus: "active" | "degraded" | "inactive" =
+      activeCount === totalCount ? "active" :
+      activeCount === 0 ? "inactive" : "degraded";
+    const chainStatusReason =
+      activeCount === totalCount ? "All models active" :
+      activeCount === 0 ? "All models inactive" :
+      `${totalCount - activeCount} of ${totalCount} models inactive`;
+
     const result: ModelChainConfig = {
       name: chain.name,
-      models: chain.models.map((ref) =>
-        resolveChainModelRef(
-          ref,
-          modelsByName,
-          chain.timeout_ms,
-          chain.max_retries,
-          parsed.request_timeout_ms,
-          parsed.max_retries,
-        ),
-      ),
+      models: chainModels,
       timeoutMs: chain.timeout_ms ?? parsed.request_timeout_ms,
       maxRetries: chain.max_retries ?? parsed.max_retries,
+      status: chainStatus,
+      statusReason: chainStatusReason,
+      statusChangedAt: getCurrentTimestamp(),
+      activeModels: activeCount,
+      totalModels: totalCount,
     };
     if (chain.chain_timeout_ms !== undefined) {
       result.chainTimeoutMs = chain.chain_timeout_ms;
@@ -330,7 +371,7 @@ function loadYamlConfig(
     return result;
   });
 
-  const config: { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } = {
+  const config: { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; copilotProxy: CopilotProxyConfig } = {
     models,
     modelChains,
     upstreamBaseUrl: models[0]!.baseUrl,
@@ -354,6 +395,7 @@ function loadYamlConfig(
     if (token) {
       config.gatewayAuthToken = token;
     }
+    config.gatewayAuthTokenEnv = parsed.gateway_auth_token_env;
   }
 
   if (parsed.cors_origin) {
@@ -369,33 +411,265 @@ function loadYamlConfig(
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const parsed = envSchema.parse(env);
-  const configSource = loadYamlConfig(parsed.GATEWAY_CONFIG_PATH, env);
+
+  // Open the database and run migrations before any data access.
+  const db = openDatabase(env);
+  runMigrations(db, allMigrations);
+
+  // If the database is empty, parse and validate the YAML config, then seed.
+  const row = db.prepare("SELECT COUNT(*) AS cnt FROM models").get() as unknown as { cnt: number };
+
+  if (row.cnt === 0) {
+    const yamlSource = loadYamlConfig(parsed.GATEWAY_CONFIG_PATH, env);
+    const yamlConfig: AppConfig = {
+      host: parsed.HOST,
+      port: parsed.PORT,
+      logLevel: parsed.LOG_LEVEL,
+      upstreamBaseUrl: yamlSource.upstreamBaseUrl,
+      requestTimeoutMs: yamlSource.requestTimeoutMs,
+      maxRetries: yamlSource.maxRetries,
+      maxBodySizeKb: yamlSource.maxBodySizeKb,
+      healthProbeEnabled: yamlSource.healthProbeEnabled,
+      copilotProxy: yamlSource.copilotProxy,
+      models: yamlSource.models,
+      modelChains: yamlSource.modelChains,
+    };
+
+    if (yamlSource.defaultModel) {
+      yamlConfig.defaultModel = yamlSource.defaultModel;
+    }
+    if (yamlSource.gatewayAuthToken) {
+      yamlConfig.gatewayAuthToken = yamlSource.gatewayAuthToken;
+    }
+    if (yamlSource.gatewayAuthTokenEnv) {
+      yamlConfig.gatewayAuthTokenEnv = yamlSource.gatewayAuthTokenEnv;
+    }
+    if (yamlSource.corsOrigin) {
+      yamlConfig.corsOrigin = yamlSource.corsOrigin;
+    }
+
+    try {
+      seedFromConfig(yamlConfig);
+    } catch (error) {
+      console.error(
+        `[seed] Seeding failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exit(1);
+    }
+  }
+
+  // Load AppConfig from the database (the source of truth after seeding).
+  return loadConfigFromDatabase(parsed, env);
+}
+
+/**
+ * Build an `AppConfig` by reading from the database.
+ *
+ * Models, chains, and gateway settings are loaded via the repository layer.
+ * API keys are resolved from the environment at runtime using the `api_key_env`
+ * column — they are never stored in the database.
+ */
+function loadConfigFromDatabase(
+  parsed: { HOST: string; PORT: number; LOG_LEVEL: string },
+  env: NodeJS.ProcessEnv,
+): AppConfig {
+  // --- Load models from database ---
+  const modelRows = getAllModels();
+  const models: GatewayModelConfig[] = modelRows.map((row) => {
+    const apiKey = resolveApiKey(row.api_key_env, row.name, env);
+    return {
+      name: row.name,
+      upstreamModel: row.upstream_model,
+      baseUrl: normalizeBaseUrl(row.base_url),
+      apiKey,
+      apiKeyEnv: row.api_key_env,
+      ownedBy: row.owned_by,
+      created: row.created,
+      supportsTools: row.supports_tools === 1,
+      supportsStreaming: row.supports_streaming === 1,
+      unknownFieldMode: row.unknown_field_mode as "warn" | "enforce",
+      unknownFieldWindowRequests: row.unknown_field_window_requests,
+      status: row.status,
+      statusReason: row.status_reason,
+      statusChangedAt: row.status_changed_at,
+    };
+  });
+
+  const modelsByName = new Map(models.map((m) => [m.name, m]));
+
+  // --- Load chains from database ---
+  const chainRows = getAllChains();
+  const modelChains: ModelChainConfig[] = chainRows.map((chainRow) => {
+    const chainModelRows = getChainModels(chainRow.name);
+    const chainModelEntries: ChainModelEntry[] = chainModelRows.map((cm) => {
+      const modelConfig = modelsByName.get(cm.model_name);
+      if (!modelConfig) {
+        throw new Error(
+          `Model "${cm.model_name}" referenced in chain "${chainRow.name}" is not present in the model catalog.`,
+        );
+      }
+      return {
+        name: cm.model_name,
+        modelConfig,
+        timeoutMs: cm.timeout_ms ?? chainRow.timeout_ms,
+        maxRetries: cm.max_retries ?? chainRow.max_retries,
+      };
+    });
+
+    const activeCount = chainModelEntries.filter((m) => m.modelConfig.status === "active").length;
+    const totalCount = chainModelEntries.length;
+
+    const result: ModelChainConfig = {
+      name: chainRow.name,
+      models: chainModelEntries,
+      timeoutMs: chainRow.timeout_ms,
+      maxRetries: chainRow.max_retries,
+      status: chainRow.status,
+      statusReason: chainRow.status_reason,
+      statusChangedAt: chainRow.status_changed_at,
+      activeModels: activeCount,
+      totalModels: totalCount,
+    };
+
+    if (chainRow.chain_timeout_ms !== null) {
+      result.chainTimeoutMs = chainRow.chain_timeout_ms;
+    }
+
+    return result;
+  });
+
+  // --- Load gateway config from database ---
+  const gatewayRow = getGatewayConfig();
+  if (!gatewayRow) {
+    throw new Error("Gateway config row not found in database. The database may not have been seeded.");
+  }
+
+  // Resolve gateway auth token from environment
+  let gatewayAuthToken: string | undefined;
+  let gatewayAuthTokenEnv: string | undefined;
+  if (gatewayRow.gateway_auth_token_env) {
+    const token = env[gatewayRow.gateway_auth_token_env];
+    if (token) {
+      gatewayAuthToken = token;
+    }
+    gatewayAuthTokenEnv = gatewayRow.gateway_auth_token_env;
+  }
+
+  // Parse cors_origin from database (may be JSON array or plain string)
+  let corsOrigin: string | string[] | undefined;
+  if (gatewayRow.cors_origin) {
+    try {
+      const parsed = JSON.parse(gatewayRow.cors_origin);
+      corsOrigin = Array.isArray(parsed) ? parsed : gatewayRow.cors_origin;
+    } catch {
+      corsOrigin = gatewayRow.cors_origin;
+    }
+  }
+
+  // Parse copilot proxy allowed prefixes from JSON
+  let allowedPrefixes: string[] = ["copilot-"];
+  try {
+    allowedPrefixes = JSON.parse(gatewayRow.copilot_proxy_allowed_prefixes);
+  } catch {
+    // Fall back to default
+  }
+
+  const copilotProxy: CopilotProxyConfig = {
+    enabled: gatewayRow.copilot_proxy_enabled === 1,
+    requireTokenAuth: gatewayRow.copilot_proxy_require_token_auth === 1,
+    tokenTtlSeconds: gatewayRow.copilot_proxy_token_ttl_seconds,
+    heartbeatIntervalMs: gatewayRow.copilot_proxy_heartbeat_interval_ms,
+    heartbeatTimeoutMs: gatewayRow.copilot_proxy_heartbeat_timeout_ms,
+    maxInflightPerConnection: gatewayRow.copilot_proxy_max_inflight_per_connection,
+    allowedPrefixes,
+  };
+
+  // Determine upstream base URL: prefer the default model, then the first
+  // model by creation timestamp (closest to insertion order), then any model.
+  let upstreamBaseUrl = "";
+  if (gatewayRow.default_model) {
+    const defaultModel = modelsByName.get(gatewayRow.default_model);
+    if (defaultModel) {
+      upstreamBaseUrl = defaultModel.baseUrl;
+    }
+  }
+  if (!upstreamBaseUrl && models.length > 0) {
+    const earliest = models.reduce((a, b) => (a.created < b.created ? a : b));
+    upstreamBaseUrl = earliest.baseUrl;
+  }
 
   const config: AppConfig = {
     host: parsed.HOST,
     port: parsed.PORT,
-    logLevel: parsed.LOG_LEVEL,
-    upstreamBaseUrl: configSource.upstreamBaseUrl,
-    requestTimeoutMs: configSource.requestTimeoutMs,
-    maxRetries: configSource.maxRetries,
-    maxBodySizeKb: configSource.maxBodySizeKb,
-    healthProbeEnabled: configSource.healthProbeEnabled,
-    copilotProxy: configSource.copilotProxy,
-    models: configSource.models,
-    modelChains: configSource.modelChains,
+    logLevel: parsed.LOG_LEVEL as AppConfig["logLevel"],
+    upstreamBaseUrl,
+    requestTimeoutMs: gatewayRow.request_timeout_ms,
+    maxRetries: gatewayRow.max_retries,
+    maxBodySizeKb: gatewayRow.max_body_size_kb,
+    healthProbeEnabled: gatewayRow.health_probe_enabled === 1,
+    copilotProxy,
+    models,
+    modelChains,
   };
 
-  if (configSource.defaultModel) {
-    config.defaultModel = configSource.defaultModel;
+  if (gatewayRow.default_model) {
+    config.defaultModel = gatewayRow.default_model;
   }
-
-  if (configSource.gatewayAuthToken) {
-    config.gatewayAuthToken = configSource.gatewayAuthToken;
+  if (gatewayAuthToken) {
+    config.gatewayAuthToken = gatewayAuthToken;
   }
-
-  if (configSource.corsOrigin) {
-    config.corsOrigin = configSource.corsOrigin;
+  if (gatewayAuthTokenEnv) {
+    config.gatewayAuthTokenEnv = gatewayAuthTokenEnv;
+  }
+  if (corsOrigin) {
+    config.corsOrigin = corsOrigin;
   }
 
   return config;
+}
+
+/**
+ * Resolve an API key from the environment using the `api_key_env` column value.
+ * Throws if the environment variable is not set or empty.
+ */
+function resolveApiKey(apiKeyEnv: string, modelName: string, env: NodeJS.ProcessEnv): string {
+  const apiKey = env[apiKeyEnv];
+  if (!apiKey) {
+    throw new Error(
+      `Missing API key for model ${modelName} from environment variable ${apiKeyEnv}.`,
+    );
+  }
+  return apiKey;
+}
+
+/**
+ * Initialise the database and seed from the YAML config if the `models`
+ * table is empty.
+ *
+ * This function is idempotent: on a fresh database it seeds all models,
+ * chains, and the gateway config row; on an existing populated database
+ * it is a no-op.
+ *
+ * Validation errors from the YAML config cause the process to exit with
+ * code 1, matching the acceptance criteria.
+ */
+export function seedIfNeeded(config: AppConfig, env: NodeJS.ProcessEnv = process.env): void {
+  const db = openDatabase(env);
+  runMigrations(db, allMigrations);
+
+  // Check if models table has any rows.
+  const row = db.prepare("SELECT COUNT(*) AS cnt FROM models").get() as unknown as { cnt: number };
+
+  if (row.cnt === 0) {
+    try {
+      seedFromConfig(config);
+    } catch (error) {
+      console.error(
+        `[seed] Seeding failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      process.exit(1);
+    }
+  } else {
+    console.info("[seed] Database already populated — skipping seed");
+  }
 }

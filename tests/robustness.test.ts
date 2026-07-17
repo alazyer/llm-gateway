@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 
 import { createApp } from "../src/app.js";
 import type { AppConfig } from "../src/config.js";
 import { loadConfig } from "../src/config.js";
+import { closeDatabase } from "../src/db/index.js";
 
 const baseConfig: AppConfig = {
   host: "127.0.0.1",
@@ -24,12 +25,16 @@ const baseConfig: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret-key",
+      apiKeyEnv: "GLM_API_KEY",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -70,10 +75,19 @@ function getRequestHeader(init: RequestInit | undefined, name: string): string |
 // Task Group 2: Upstream Resilience (Timeouts + Retries)
 // ──────────────────────────────────────────────
 
+beforeEach(() => {
+  closeDatabase();
+});
+
+afterEach(() => {
+  closeDatabase();
+});
+
 describe("Upstream resilience", () => {
   describe("timeout config", () => {
     it("loads request_timeout_ms from YAML with default of 30000", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-resilience-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -91,6 +105,7 @@ describe("Upstream resilience", () => {
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 
@@ -104,6 +119,7 @@ describe("Upstream resilience", () => {
 
     it("loads custom request_timeout_ms and max_retries from YAML", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-resilience-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -124,6 +140,7 @@ models:
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 
@@ -364,6 +381,7 @@ describe("Request guardrails", () => {
   describe("body size limit", () => {
     it("loads max_body_size_kb from YAML with default of 1024", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-guardrails-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -381,6 +399,7 @@ describe("Request guardrails", () => {
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 
@@ -392,6 +411,7 @@ describe("Request guardrails", () => {
 
     it("loads custom max_body_size_kb from YAML", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-guardrails-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -410,6 +430,7 @@ models:
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 
@@ -480,6 +501,7 @@ models:
   describe("unknown-field counter window reset", () => {
     it("loads unknown_field_window_requests from YAML with default of 100", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-counter-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -497,6 +519,7 @@ models:
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 
@@ -508,6 +531,7 @@ models:
 
     it("loads custom unknown_field_window_requests from YAML", () => {
       const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-counter-"));
+      const dbPath = join(tempDir, "gateway.db");
       const configPath = join(tempDir, "gateway.config.yaml");
 
       writeFileSync(
@@ -526,6 +550,7 @@ models:
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+          GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key",
         });
 

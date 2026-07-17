@@ -8,4 +8,4 @@ coverage
 *.log
 
 
-.worktree
+.worktreedata/*.db

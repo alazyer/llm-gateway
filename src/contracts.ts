@@ -11,6 +11,11 @@ export interface ModelChainConfig {
   timeoutMs: number;
   maxRetries: number;
   chainTimeoutMs?: number;
+  status: string;
+  statusReason: string | null;
+  statusChangedAt: number | null;
+  activeModels: number;
+  totalModels: number;
 }
 
 export type ResponseRole = "user" | "assistant" | "system" | "developer";

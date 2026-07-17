@@ -41,6 +41,22 @@ export class ChainBudgetExceededError extends Error {
   }
 }
 
+export class ChainInactiveError extends Error {
+  public readonly chainName: string;
+  public readonly activeModels: number;
+  public readonly totalModels: number;
+
+  public constructor(chainName: string, activeModels: number, totalModels: number) {
+    super(
+      `Chain "${chainName}" has no active models (${activeModels}/${totalModels} active).`,
+    );
+    this.name = "ChainInactiveError";
+    this.chainName = chainName;
+    this.activeModels = activeModels;
+    this.totalModels = totalModels;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Descriptor type
 // ---------------------------------------------------------------------------
@@ -89,6 +105,35 @@ export function isRetryableForChain(error: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Active model filtering
+// ---------------------------------------------------------------------------
+
+/**
+ * Filters a chain's model list to only include active models.
+ * Returns the filtered list and metadata about active/total counts.
+ */
+export function filterActiveModels(models: ChainModelEntry[]): {
+  activeModels: ChainModelEntry[];
+  activeCount: number;
+  totalCount: number;
+} {
+  const activeModels = models.filter((entry) => entry.modelConfig.status === "active");
+  return {
+    activeModels,
+    activeCount: activeModels.length,
+    totalCount: models.length,
+  };
+}
+
+/**
+ * Returns true when a chain is degraded (some but not all models are inactive).
+ * A chain is degraded when 0 < activeCount < totalCount.
+ */
+export function isChainDegraded(activeCount: number, totalCount: number): boolean {
+  return activeCount > 0 && activeCount < totalCount;
+}
+
+// ---------------------------------------------------------------------------
 // Settings resolution
 // ---------------------------------------------------------------------------
 
@@ -128,15 +173,34 @@ export interface ExecuteChainParams {
   logger: LoggerLike;
 }
 
-export async function executeChain(params: ExecuteChainParams): Promise<ChatCompletionResponse> {
+export async function executeChain(params: ExecuteChainParams): Promise<ChatCompletionResponse & { _chainDegraded?: boolean }> {
   const { descriptor, upstreamRequest, transportFactory, gatewayTimeoutMs, gatewayMaxRetries, logger } = params;
   const chain = descriptor.chain;
+
+  // Filter inactive models before execution
+  const { activeModels, activeCount, totalCount } = filterActiveModels(chain.models);
+  if (activeCount === 0) {
+    logger.warn(
+      { chain: chain.name, activeCount, totalCount },
+      "Chain has no active models — rejecting immediately.",
+    );
+    throw new ChainInactiveError(chain.name, activeCount, totalCount);
+  }
+
+  const degraded = isChainDegraded(activeCount, totalCount);
+  if (degraded) {
+    logger.info(
+      { chain: chain.name, activeCount, totalCount, inactiveModels: chain.models.filter((m) => m.modelConfig.status !== "active").map((m) => m.name) },
+      "Chain is degraded — some models are inactive.",
+    );
+  }
+
   const chainTimeoutMs = chain.chainTimeoutMs;
   const chainStart = Date.now();
   const attempts: ChainAttempt[] = [];
 
-  for (let i = 0; i < chain.models.length; i++) {
-    const entry = chain.models[i]!;
+  for (let i = 0; i < activeModels.length; i++) {
+    const entry = activeModels[i]!;
     const attemptIndex = i + 1; // 1-based
 
     // Check budget before attempting this model
@@ -242,8 +306,8 @@ export async function executeChain(params: ExecuteChainParams): Promise<ChatComp
     }
   }
 
-  // All models exhausted with retryable errors
-  throw new ChainExhaustedError(chain.name, chain.models.length, attempts);
+  // All active models exhausted with retryable errors
+  throw new ChainExhaustedError(chain.name, activeModels.length, attempts);
 }
 
 // ---------------------------------------------------------------------------
@@ -275,11 +339,30 @@ export async function* executeChainStream(
 ): AsyncGenerator<string> {
   const { descriptor, upstreamRequest, transportFactory, gatewayTimeoutMs, gatewayMaxRetries, logger } = params;
   const chain = descriptor.chain;
+
+  // Filter inactive models before execution
+  const { activeModels, activeCount, totalCount } = filterActiveModels(chain.models);
+  if (activeCount === 0) {
+    logger.warn(
+      { chain: chain.name, activeCount, totalCount },
+      "Chain has no active models — rejecting immediately.",
+    );
+    throw new ChainInactiveError(chain.name, activeCount, totalCount);
+  }
+
+  const degraded = isChainDegraded(activeCount, totalCount);
+  if (degraded) {
+    logger.info(
+      { chain: chain.name, activeCount, totalCount, inactiveModels: chain.models.filter((m) => m.modelConfig.status !== "active").map((m) => m.name) },
+      "Chain is degraded — some models are inactive.",
+    );
+  }
+
   const chainTimeoutMs = chain.chainTimeoutMs;
   const chainStart = Date.now();
 
-  for (let i = 0; i < chain.models.length; i++) {
-    const entry = chain.models[i]!;
+  for (let i = 0; i < activeModels.length; i++) {
+    const entry = activeModels[i]!;
     const attemptIndex = i + 1; // 1-based
 
     // Check budget before attempting this model
@@ -425,8 +508,8 @@ export async function* executeChainStream(
     }
   }
 
-  // All models exhausted with retryable errors
-  throw new ChainExhaustedError(chain.name, chain.models.length, []);
+  // All active models exhausted with retryable errors
+  throw new ChainExhaustedError(chain.name, activeModels.length, []);
 }
 
 // ---------------------------------------------------------------------------

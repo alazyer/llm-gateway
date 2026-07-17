@@ -23,12 +23,16 @@ const singleModelConfig: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret-key",
+      apiKeyEnv: "API_KEY",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -49,24 +53,32 @@ const multiModelConfig: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider-a.example/v1",
       apiKey: "api-key-a",
+      apiKeyEnv: "API_KEY_A",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
     {
       name: "coder-alias",
       upstreamModel: "provider-internal-coder",
       baseUrl: "https://provider-b.example/v1",
       apiKey: "api-key-b",
+      apiKeyEnv: "API_KEY_B",
       ownedBy: "custom-provider",
       created: 1_718_000_001,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -151,6 +163,7 @@ describe("createApp", () => {
             permission: [],
             root: "glm-5.1",
             parent: null,
+            status: "active",
             capabilities: {
               input_modalities: ["text"],
               output_modalities: ["text"],
@@ -179,6 +192,7 @@ describe("createApp", () => {
             permission: [],
             root: "coder-alias",
             parent: null,
+            status: "active",
             capabilities: {
               input_modalities: ["text"],
               output_modalities: ["text"],
@@ -211,6 +225,7 @@ describe("createApp", () => {
         permission: [],
         root: "coder-alias",
         parent: null,
+        status: "active",
         capabilities: {
           input_modalities: ["text"],
           output_modalities: ["text"],
@@ -985,12 +1000,16 @@ describe("createApp", () => {
       upstreamModel: "gpt-5",
       baseUrl: "https://provider.example/v1",
       apiKey: "key-a",
+      apiKeyEnv: "API_KEY_A",
       ownedBy: "llm-gateway",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
       ...overrides,
     };
   }
@@ -1006,11 +1025,22 @@ describe("createApp", () => {
   }
 
   function makeChain(models: ChainModelEntry[], overrides: Partial<ModelChainConfig> = {}): ModelChainConfig {
+    const activeCount = models.filter((m) => m.modelConfig.status === "active").length;
+    const totalCount = models.length;
+    const chainStatus: "active" | "degraded" | "inactive" =
+      activeCount === totalCount ? "active" :
+      activeCount === 0 ? "inactive" : "degraded";
+
     return {
       name: "production",
       models,
       timeoutMs: 30000,
       maxRetries: 0,
+      status: chainStatus,
+      statusReason: `${activeCount}/${totalCount} models active`,
+      statusChangedAt: 1_718_000_000,
+      activeModels: activeCount,
+      totalModels: totalCount,
       ...overrides,
     };
   }

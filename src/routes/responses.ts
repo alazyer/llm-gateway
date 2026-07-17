@@ -27,9 +27,11 @@ import type { AppConfig, GatewayModelConfig } from "../config.js";
 import {
   ChainBudgetExceededError,
   ChainExhaustedError,
+  ChainInactiveError,
   type ChainDescriptor,
   executeChain,
   executeChainStream,
+  isChainDegraded,
 } from "../chain-executor.js";
 import type { ChainModelEntry, ModelChainConfig } from "../contracts.js";
 import type {
@@ -109,6 +111,7 @@ interface ModelRecord {
   permission: [];
   root: string;
   parent: null;
+  status: string;
   capabilities: {
     input_modalities: ["text"];
     output_modalities: ["text"];
@@ -129,6 +132,8 @@ interface ModelRecord {
   ];
   base_instructions: string;
   source?: string;
+  active_models?: number;
+  total_models?: number;
 }
 
 interface AnthropicModelRecord {
@@ -136,7 +141,10 @@ interface AnthropicModelRecord {
   type: "model";
   display_name: string;
   created_at: string;
+  status: string;
   source?: string;
+  active_models?: number;
+  total_models?: number;
 }
 
 interface ResponsesRoutesOptions {
@@ -594,6 +602,7 @@ function resolveCopilotModel(
     permission: [],
     root: model.name,
     parent: null,
+    status: model.status,
     capabilities: {
       input_modalities: ["text"],
       output_modalities: ["text"],
@@ -629,6 +638,7 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
     permission: [],
     root: model.id,
     parent: null,
+    status: "active",
     capabilities: {
       input_modalities: ["text"],
       output_modalities: ["text"],
@@ -668,6 +678,7 @@ function createChainModelRecord(chain: ModelChainConfig, startupTimestamp: numbe
     permission: [],
     root: chainId,
     parent: null,
+    status: chain.status,
     capabilities: {
       input_modalities: ["text"],
       output_modalities: ["text"],
@@ -687,23 +698,32 @@ function createChainModelRecord(chain: ModelChainConfig, startupTimestamp: numbe
       },
     ],
     base_instructions: baseInstructions,
+    active_models: chain.activeModels,
+    total_models: chain.totalModels,
   };
 }
 
 function createModelsList(
   config: AppConfig,
   copilotProxyRegistry?: CopilotProxyConnectionRegistry,
+  statusFilter?: string,
 ): { object: "list"; data: ModelRecord[] } {
   const startupTimestamp = Math.floor(Date.now() / 1000);
+  const allModels: ModelRecord[] = [
+    ...config.models.map((model) => createModelRecord(model)),
+    ...(copilotProxyRegistry?.listModels().map((model) => createCopilotModelRecord(model)) ??
+      []),
+    ...(config.modelChains?.map((chain) => createChainModelRecord(chain, startupTimestamp)) ??
+      []),
+  ];
+
+  const filtered = statusFilter
+    ? allModels.filter((record) => record.status === statusFilter)
+    : allModels;
+
   return {
     object: "list",
-    data: [
-      ...config.models.map((model) => createModelRecord(model)),
-      ...(copilotProxyRegistry?.listModels().map((model) => createCopilotModelRecord(model)) ??
-        []),
-      ...(config.modelChains?.map((chain) => createChainModelRecord(chain, startupTimestamp)) ??
-        []),
-    ],
+    data: filtered,
   };
 }
 
@@ -713,6 +733,7 @@ function createAnthropicModelRecord(model: GatewayModelConfig): AnthropicModelRe
     type: "model",
     display_name: model.name,
     created_at: new Date(model.created * 1_000).toISOString(),
+    status: model.status,
   };
 }
 
@@ -724,6 +745,7 @@ function createCopilotAnthropicModelRecord(
     type: "model",
     display_name: model.name,
     created_at: new Date(model.created * 1_000).toISOString(),
+    status: "active",
     source: model.source,
   };
 }
@@ -737,23 +759,33 @@ function createChainAnthropicModelRecord(
     type: "model",
     display_name: `chain-${chain.name}`,
     created_at: new Date(startupTimestamp * 1_000).toISOString(),
+    status: chain.status,
+    active_models: chain.activeModels,
+    total_models: chain.totalModels,
   };
 }
 
 function createAnthropicModelsList(
   config: AppConfig,
   copilotProxyRegistry?: CopilotProxyConnectionRegistry,
+  statusFilter?: string,
 ): { object: "list"; data: AnthropicModelRecord[] } {
   const startupTimestamp = Math.floor(Date.now() / 1000);
+  const allModels: AnthropicModelRecord[] = [
+    ...config.models.map((model) => createAnthropicModelRecord(model)),
+    ...(copilotProxyRegistry
+      ?.listModels()
+      .map((model) => createCopilotAnthropicModelRecord(model)) ?? []),
+    ...(config.modelChains?.map((chain) => createChainAnthropicModelRecord(chain, startupTimestamp)) ?? []),
+  ];
+
+  const filtered = statusFilter
+    ? allModels.filter((record) => record.status === statusFilter)
+    : allModels;
+
   return {
     object: "list",
-    data: [
-      ...config.models.map((model) => createAnthropicModelRecord(model)),
-      ...(copilotProxyRegistry
-        ?.listModels()
-        .map((model) => createCopilotAnthropicModelRecord(model)) ?? []),
-      ...(config.modelChains?.map((chain) => createChainAnthropicModelRecord(chain, startupTimestamp)) ?? []),
-    ],
+    data: filtered,
   };
 }
 
@@ -777,6 +809,13 @@ function resolveModel(
 
     const configured = config.models.find((model) => model.name === normalizedModel);
     if (configured) {
+      // Check model status — inactive models return 503
+      if (configured.status !== "active") {
+        throw new RouteError(
+          503,
+          configured.statusReason ?? `Model \`${configured.name}\` is ${configured.status}.`,
+        );
+      }
       return configured;
     }
 
@@ -797,12 +836,27 @@ function resolveModel(
       (model) => model.name === config.defaultModel,
     );
     if (configuredDefault) {
+      // Check model status — inactive models return 503
+      if (configuredDefault.status !== "active") {
+        throw new RouteError(
+          503,
+          configuredDefault.statusReason ?? `Model \`${configuredDefault.name}\` is ${configuredDefault.status}.`,
+        );
+      }
       return configuredDefault;
     }
   }
 
   if (config.models.length === 1) {
-    return config.models[0]!;
+    const singleModel = config.models[0]!;
+    // Check model status — inactive models return 503
+    if (singleModel.status !== "active") {
+      throw new RouteError(
+        503,
+        singleModel.statusReason ?? `Model \`${singleModel.name}\` is ${singleModel.status}.`,
+      );
+    }
+    return singleModel;
   }
 
   throw new RouteError(
@@ -1071,6 +1125,24 @@ async function sendError(
   reply.type("application/json; charset=utf-8");
 
   // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      error: error.message,
+      chain: error.chainName,
+      activeModels: error.activeModels,
+      totalModels: error.totalModels,
+    });
+  }
+
   if (error instanceof ChainExhaustedError) {
     log.error(
       {
@@ -1162,6 +1234,28 @@ function sendAnthropicError(
   reply.type("application/json; charset=utf-8");
 
   // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: error.message,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+    });
+  }
+
   if (error instanceof ChainExhaustedError) {
     log.error(
       {
@@ -1264,6 +1358,27 @@ function sendOpenAiError(
   reply.type("application/json; charset=utf-8");
 
   // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      error: {
+        message: error.message,
+        type: "api_error",
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+    });
+  }
+
   if (error instanceof ChainExhaustedError) {
     log.error(
       {
@@ -1512,10 +1627,10 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     return client;
   };
 
-  const modelsListHandler = async () =>
-    createModelsList(options.config, options.copilotProxyRegistry);
-  const anthropicModelsListHandler = async () =>
-    createAnthropicModelsList(options.config, options.copilotProxyRegistry);
+  const modelsListHandler = async (statusFilter?: string) =>
+    createModelsList(options.config, options.copilotProxyRegistry, statusFilter);
+  const anthropicModelsListHandler = async (statusFilter?: string) =>
+    createAnthropicModelsList(options.config, options.copilotProxyRegistry, statusFilter);
   const modelDetailHandler = async (
     request: FastifyRequest<{ Params: { model: string } }>,
     reply: FastifyReply,
@@ -1680,6 +1795,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         const chain = resolved.chain;
         const chainId = `chain-${chain.name}`;
         const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
 
         if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
           throw new RouteError(
@@ -1733,6 +1849,10 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
             .header("x-accel-buffering", "no")
             .header("x-chain-model", chainId);
 
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
           // Translate the chain's raw SSE stream to Responses API format
           const translator = createChatCompletionStreamTranslator(translationOptions);
           const translatedStream = async function* () {
@@ -1768,6 +1888,9 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         });
 
         reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
         return reply.code(200).send(
           translateChatCompletionResponse(chainResponse, translationOptions),
         );
@@ -1975,6 +2098,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         const chain = resolved.chain;
         const chainId = `chain-${chain.name}`;
         const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
 
         if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
           throw new RouteError(
@@ -2035,6 +2159,10 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
             .header("x-accel-buffering", "no")
             .header("x-chain-model", chainId);
 
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
           // Translate the chain's raw SSE stream to Anthropic format
           const translator = createAnthropicMessageStreamTranslator({ model: chainId });
           const translatedStream = async function* () {
@@ -2074,6 +2202,9 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         });
 
         reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
         return reply.code(200).send(anthropicResponse);
       }
       const selectedModel = resolved;
@@ -2286,6 +2417,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         const chain = resolved.chain;
         const chainId = `chain-${chain.name}`;
         const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
 
         if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
           throw new RouteError(
@@ -2338,6 +2470,10 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
             .header("x-accel-buffering", "no")
             .header("x-chain-model", chainId);
 
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
           // For chat completions, we pass through the raw SSE stream
           const translatedStream = async function* () {
             for await (const chunk of chainStream) {
@@ -2367,6 +2503,9 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         });
 
         reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
         return reply.code(200).send(chainResponse);
       }
       const selectedModel = resolved;
@@ -2467,24 +2606,27 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     }
   };
 
-  app.get("/models", async () => {
+  app.get<{ Querystring: { status?: string } }>("/models", async (request) => {
+    const statusFilter = request.query.status;
     log.debug(
-      { configuredModels: options.config.models.map((model) => model.name) },
+      { configuredModels: options.config.models.map((model) => model.name), statusFilter },
       "Serving models list.",
     );
-    return modelsListHandler();
+    return modelsListHandler(statusFilter);
   });
-  app.get("/v1/models", async (request) => {
+  app.get<{ Querystring: { status?: string } }>("/v1/models", async (request) => {
+    const statusFilter = request.query.status;
     log.debug(
       {
         configuredModels: options.config.models.map((model) => model.name),
         anthropic: hasAnthropicVersionHeader(request),
+        statusFilter,
       },
       "Serving models list.",
     );
     return hasAnthropicVersionHeader(request)
-      ? anthropicModelsListHandler()
-      : modelsListHandler();
+      ? anthropicModelsListHandler(statusFilter)
+      : modelsListHandler(statusFilter);
   });
   app.get("/models/:model", modelDetailHandler);
   app.get("/v1/models/:model", modelDetailHandler);

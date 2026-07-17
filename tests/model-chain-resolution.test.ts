@@ -96,12 +96,16 @@ function makeModel(overrides: Partial<GatewayModelConfig> = {}): GatewayModelCon
     upstreamModel: "gpt-5",
     baseUrl: "https://provider.example/v1",
     apiKey: "key-a",
+    apiKeyEnv: "API_KEY_A",
     ownedBy: "llm-gateway",
     created: 1_718_000_000,
     supportsTools: true,
     supportsStreaming: true,
     unknownFieldMode: "warn",
     unknownFieldWindowRequests: 100,
+    status: "active",
+    statusReason: "Loaded from config",
+    statusChangedAt: 1_718_000_000,
     ...overrides,
   };
 }
@@ -117,11 +121,20 @@ function makeChainEntry(name: string, overrides: Partial<ChainModelEntry> = {}):
 }
 
 function makeChain(overrides: Partial<ModelChainConfig> = {}): ModelChainConfig {
+  const models = [makeChainEntry("gpt-5"), makeChainEntry("glm-5.1")];
+  const activeCount = models.filter((m) => m.modelConfig.status === "active").length;
+  const totalCount = models.length;
+
   return {
     name: "production",
-    models: [makeChainEntry("gpt-5"), makeChainEntry("glm-5.1")],
+    models,
     timeoutMs: 30000,
     maxRetries: 0,
+    status: "active",
+    statusReason: `${activeCount}/${totalCount} models active`,
+    statusChangedAt: 1_718_000_000,
+    activeModels: activeCount,
+    totalModels: totalCount,
     ...overrides,
   };
 }
