@@ -52,7 +52,7 @@ describe("findMatchingPrefix", () => {
 
 describe("CopilotProxyConnectionRegistry with custom allowedPrefixes", () => {
   it("accepts models matching any allowed prefix", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-", "alazyer-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-", "alazyer-"] });
     const sent: unknown[] = [];
 
     registry.addConnection("a", (message) => sent.push(message));
@@ -67,7 +67,7 @@ describe("CopilotProxyConnectionRegistry with custom allowedPrefixes", () => {
   });
 
   it("rejects models with disallowed prefix", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-"] });
 
     registry.addConnection("a");
 
@@ -90,7 +90,7 @@ describe("CopilotProxyConnectionRegistry with custom allowedPrefixes", () => {
   });
 
   it("rejects models whose source does not match the prefix", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-"] });
     registry.addConnection("a");
 
     const wrongSourceModel: CopilotProxyModel = {
@@ -124,7 +124,7 @@ describe("CopilotProxyConnectionRegistry with custom allowedPrefixes", () => {
 
 describe("CopilotProxyConnectionRegistry getChannelsInfo", () => {
   it("returns empty channels when no connections", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-", "alazyer-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-", "alazyer-"] });
     const channels = registry.getChannelsInfo();
     expect(channels).toEqual([
       { prefix: "alazyer-", connectionCount: 0, modelIds: [] },
@@ -133,7 +133,7 @@ describe("CopilotProxyConnectionRegistry getChannelsInfo", () => {
   });
 
   it("returns channel info with connections and models", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-", "alazyer-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-", "alazyer-"] });
     const sent: unknown[] = [];
 
     registry.addConnection("a", (message) => sent.push(message));
@@ -149,7 +149,7 @@ describe("CopilotProxyConnectionRegistry getChannelsInfo", () => {
   });
 
   it("counts connections per prefix but not duplicates from same connection", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-"] });
     const sent: unknown[] = [];
 
     registry.addConnection("a", (message) => sent.push(message));
@@ -164,7 +164,7 @@ describe("CopilotProxyConnectionRegistry getChannelsInfo", () => {
   });
 
   it("excludes unhealthy connections", () => {
-    const registry = new CopilotProxyConnectionRegistry(["copilot-"]);
+    const registry = new CopilotProxyConnectionRegistry({ allowedPrefixes: ["copilot-"] });
     const sent: unknown[] = [];
 
     registry.addConnection("a", (message) => sent.push(message));

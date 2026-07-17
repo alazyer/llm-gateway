@@ -12,6 +12,7 @@ import { CopilotProxyConnectionRegistry } from "./copilot-proxy/registry.js";
 import { registerCopilotProxyWebsocket } from "./copilot-proxy/server.js";
 import { registerCorsHook } from "./cors.js";
 import { responsesRoutes } from "./routes/responses.js";
+import { adminRoutes } from "./routes/admin.js";
 import type { ChatCompletionsTransport } from "./upstream/chat-completions-client.js";
 
 export interface CreateAppOptions {
@@ -29,7 +30,10 @@ export function createApp(options: CreateAppOptions) {
   const copilotProxyTokenStore = new CopilotProxyTokenStore({
     tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
   });
-  const copilotProxyRegistry = new CopilotProxyConnectionRegistry(copilotProxyConfig.allowedPrefixes);
+  const copilotProxyRegistry = new CopilotProxyConnectionRegistry({
+    allowedPrefixes: copilotProxyConfig.allowedPrefixes,
+    persistenceEnabled: true,
+  });
   const app = Fastify({
     bodyLimit: options.config.maxBodySizeKb * 1024,
     logger: {
@@ -180,6 +184,9 @@ export function createApp(options: CreateAppOptions) {
   }
 
   void app.register(responsesRoutes, routeOptions);
+
+  // Admin routes — protected by the existing auth hook (gateway_auth_token).
+  void app.register(adminRoutes);
 
   return app;
 }

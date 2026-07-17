@@ -24,6 +24,16 @@ import type {
   ResponseRequest,
 } from "../contracts.js";
 import type { AppConfig, GatewayModelConfig } from "../config.js";
+import {
+  ChainBudgetExceededError,
+  ChainExhaustedError,
+  ChainInactiveError,
+  type ChainDescriptor,
+  executeChain,
+  executeChainStream,
+  isChainDegraded,
+} from "../chain-executor.js";
+import type { ChainModelEntry, ModelChainConfig } from "../contracts.js";
 import type {
   CopilotProxyConnectionRegistry,
   CopilotProxyStreamMessage,
@@ -101,6 +111,7 @@ interface ModelRecord {
   permission: [];
   root: string;
   parent: null;
+  status: string;
   capabilities: {
     input_modalities: ["text"];
     output_modalities: ["text"];
@@ -121,6 +132,8 @@ interface ModelRecord {
   ];
   base_instructions: string;
   source?: string;
+  active_models?: number;
+  total_models?: number;
 }
 
 interface AnthropicModelRecord {
@@ -128,7 +141,10 @@ interface AnthropicModelRecord {
   type: "model";
   display_name: string;
   created_at: string;
+  status: string;
   source?: string;
+  active_models?: number;
+  total_models?: number;
 }
 
 interface ResponsesRoutesOptions {
@@ -586,6 +602,7 @@ function resolveCopilotModel(
     permission: [],
     root: model.name,
     parent: null,
+    status: model.status,
     capabilities: {
       input_modalities: ["text"],
       output_modalities: ["text"],
@@ -621,6 +638,7 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
     permission: [],
     root: model.id,
     parent: null,
+    status: "active",
     capabilities: {
       input_modalities: ["text"],
       output_modalities: ["text"],
@@ -644,17 +662,68 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
   };
 }
 
+function createChainModelRecord(chain: ModelChainConfig, startupTimestamp: number): ModelRecord {
+  const baseInstructions =
+    "You are a helpful AI assistant. Follow developer and user instructions, keep responses accurate, and prefer concise plain-text output unless the caller asks for a specific format.";
+
+  const firstModel = chain.models[0]!;
+  const chainId = `chain-${chain.name}`;
+
+  return {
+    id: chainId,
+    display_name: chainId,
+    object: "model",
+    created: startupTimestamp,
+    owned_by: "llm-gateway-chain",
+    permission: [],
+    root: chainId,
+    parent: null,
+    status: chain.status,
+    capabilities: {
+      input_modalities: ["text"],
+      output_modalities: ["text"],
+      supports_responses_api: true,
+      supports_streaming: firstModel.modelConfig.supportsStreaming,
+      supports_system_messages: true,
+      supports_model_messages: true,
+      supports_personality: true,
+      supports_tool_calls: firstModel.modelConfig.supportsTools,
+      supports_parallel_tool_calls: firstModel.modelConfig.supportsTools,
+    },
+    personality: "default",
+    model_messages: [
+      {
+        role: "system",
+        content: baseInstructions,
+      },
+    ],
+    base_instructions: baseInstructions,
+    active_models: chain.activeModels,
+    total_models: chain.totalModels,
+  };
+}
+
 function createModelsList(
   config: AppConfig,
   copilotProxyRegistry?: CopilotProxyConnectionRegistry,
+  statusFilter?: string,
 ): { object: "list"; data: ModelRecord[] } {
+  const startupTimestamp = Math.floor(Date.now() / 1000);
+  const allModels: ModelRecord[] = [
+    ...config.models.map((model) => createModelRecord(model)),
+    ...(copilotProxyRegistry?.listModels().map((model) => createCopilotModelRecord(model)) ??
+      []),
+    ...(config.modelChains?.map((chain) => createChainModelRecord(chain, startupTimestamp)) ??
+      []),
+  ];
+
+  const filtered = statusFilter
+    ? allModels.filter((record) => record.status === statusFilter)
+    : allModels;
+
   return {
     object: "list",
-    data: [
-      ...config.models.map((model) => createModelRecord(model)),
-      ...(copilotProxyRegistry?.listModels().map((model) => createCopilotModelRecord(model)) ??
-        []),
-    ],
+    data: filtered,
   };
 }
 
@@ -664,6 +733,7 @@ function createAnthropicModelRecord(model: GatewayModelConfig): AnthropicModelRe
     type: "model",
     display_name: model.name,
     created_at: new Date(model.created * 1_000).toISOString(),
+    status: model.status,
   };
 }
 
@@ -675,34 +745,77 @@ function createCopilotAnthropicModelRecord(
     type: "model",
     display_name: model.name,
     created_at: new Date(model.created * 1_000).toISOString(),
+    status: "active",
     source: model.source,
+  };
+}
+
+function createChainAnthropicModelRecord(
+  chain: ModelChainConfig,
+  startupTimestamp: number,
+): AnthropicModelRecord {
+  return {
+    id: `chain-${chain.name}`,
+    type: "model",
+    display_name: `chain-${chain.name}`,
+    created_at: new Date(startupTimestamp * 1_000).toISOString(),
+    status: chain.status,
+    active_models: chain.activeModels,
+    total_models: chain.totalModels,
   };
 }
 
 function createAnthropicModelsList(
   config: AppConfig,
   copilotProxyRegistry?: CopilotProxyConnectionRegistry,
+  statusFilter?: string,
 ): { object: "list"; data: AnthropicModelRecord[] } {
+  const startupTimestamp = Math.floor(Date.now() / 1000);
+  const allModels: AnthropicModelRecord[] = [
+    ...config.models.map((model) => createAnthropicModelRecord(model)),
+    ...(copilotProxyRegistry
+      ?.listModels()
+      .map((model) => createCopilotAnthropicModelRecord(model)) ?? []),
+    ...(config.modelChains?.map((chain) => createChainAnthropicModelRecord(chain, startupTimestamp)) ?? []),
+  ];
+
+  const filtered = statusFilter
+    ? allModels.filter((record) => record.status === statusFilter)
+    : allModels;
+
   return {
     object: "list",
-    data: [
-      ...config.models.map((model) => createAnthropicModelRecord(model)),
-      ...(copilotProxyRegistry
-        ?.listModels()
-        .map((model) => createCopilotAnthropicModelRecord(model)) ?? []),
-    ],
+    data: filtered,
   };
 }
 
 function resolveModel(
   config: AppConfig,
   requestedModel?: string,
-): GatewayModelConfig {
+): GatewayModelConfig | ChainDescriptor {
   const normalizedModel = normalizeOptionalString(requestedModel);
 
   if (normalizedModel) {
+    // Chain resolution MUST happen before plain model lookup and Copilot proxy
+    // lookup to prevent chain-copilot-* from being misrouted.
+    if (normalizedModel.startsWith("chain-")) {
+      const chainName = normalizedModel.slice("chain-".length);
+      const chain = config.modelChains?.find((c) => c.name === chainName);
+      if (chain) {
+        return { type: "chain", chain };
+      }
+      throw new RouteError(400, `Chain \`${chainName}\` is not configured.`);
+    }
+
     const configured = config.models.find((model) => model.name === normalizedModel);
     if (configured) {
+      // Check model status — inactive models return 503
+      if (configured.status !== "active") {
+        throw new RouteError(
+          503,
+          configured.statusReason ?? `Model \`${configured.name}\` is ${configured.status}.`,
+        );
+      }
       return configured;
     }
 
@@ -710,21 +823,56 @@ function resolveModel(
   }
 
   if (config.defaultModel) {
+    // Support chain-<name> as default_model
+    if (config.defaultModel.startsWith("chain-")) {
+      const chainName = config.defaultModel.slice("chain-".length);
+      const chain = config.modelChains?.find((c) => c.name === chainName);
+      if (chain) {
+        return { type: "chain", chain };
+      }
+    }
+
     const configuredDefault = config.models.find(
       (model) => model.name === config.defaultModel,
     );
     if (configuredDefault) {
+      // Check model status — inactive models return 503
+      if (configuredDefault.status !== "active") {
+        throw new RouteError(
+          503,
+          configuredDefault.statusReason ?? `Model \`${configuredDefault.name}\` is ${configuredDefault.status}.`,
+        );
+      }
       return configuredDefault;
     }
   }
 
   if (config.models.length === 1) {
-    return config.models[0]!;
+    const singleModel = config.models[0]!;
+    // Check model status — inactive models return 503
+    if (singleModel.status !== "active") {
+      throw new RouteError(
+        503,
+        singleModel.statusReason ?? `Model \`${singleModel.name}\` is ${singleModel.status}.`,
+      );
+    }
+    return singleModel;
   }
 
   throw new RouteError(
     400,
     "Request body must include a model or the gateway must define a single/default model.",
+  );
+}
+
+/** Type guard: true when resolveModel() returned a chain descriptor. */
+function isChainDescriptor(
+  result: GatewayModelConfig | ChainDescriptor,
+): result is ChainDescriptor {
+  return (
+    typeof result === "object" &&
+    result !== null &&
+    (result as { type?: unknown }).type === "chain"
   );
 }
 
@@ -976,6 +1124,57 @@ async function sendError(
   // FST_ERR_REP_INVALID_PAYLOAD_TYPE.
   reply.type("application/json; charset=utf-8");
 
+  // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      error: error.message,
+      chain: error.chainName,
+      activeModels: error.activeModels,
+      totalModels: error.totalModels,
+    });
+  }
+
+  if (error instanceof ChainExhaustedError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        modelsTried: error.modelsTried,
+        attempts: error.attempts,
+      },
+      "Chain exhausted all models.",
+    );
+    return reply.code(502).send({
+      error: error.message,
+      chain: error.chainName,
+      modelsTried: error.modelsTried,
+      attempts: error.attempts,
+    });
+  }
+
+  if (error instanceof ChainBudgetExceededError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+      },
+      "Chain budget exceeded.",
+    );
+    return reply.code(504).send({
+      error: error.message,
+      chain: error.chainName,
+    });
+  }
+
   if (error instanceof UpstreamHttpError) {
     log.warn(
       {
@@ -1033,6 +1232,68 @@ function sendAnthropicError(
   // text/event-stream on the reply, sending a plain object would trigger
   // FST_ERR_REP_INVALID_PAYLOAD_TYPE.
   reply.type("application/json; charset=utf-8");
+
+  // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: error.message,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+    });
+  }
+
+  if (error instanceof ChainExhaustedError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        modelsTried: error.modelsTried,
+        attempts: error.attempts,
+      },
+      "Chain exhausted all models.",
+    );
+    return reply.code(502).send({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: error.message,
+        chain: error.chainName,
+        modelsTried: error.modelsTried,
+      },
+    });
+  }
+
+  if (error instanceof ChainBudgetExceededError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+      },
+      "Chain budget exceeded.",
+    );
+    return reply.code(504).send({
+      type: "error",
+      error: {
+        type: "api_error",
+        message: error.message,
+        chain: error.chainName,
+      },
+    });
+  }
 
   if (error instanceof UpstreamHttpError) {
     log.warn(
@@ -1095,6 +1356,65 @@ function sendOpenAiError(
   requestId?: string,
 ): FastifyReply {
   reply.type("application/json; charset=utf-8");
+
+  // Chain-specific errors
+  if (error instanceof ChainInactiveError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+      "Chain has no active models.",
+    );
+    return reply.code(503).send({
+      error: {
+        message: error.message,
+        type: "api_error",
+        chain: error.chainName,
+        activeModels: error.activeModels,
+        totalModels: error.totalModels,
+      },
+    });
+  }
+
+  if (error instanceof ChainExhaustedError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+        modelsTried: error.modelsTried,
+        attempts: error.attempts,
+      },
+      "Chain exhausted all models.",
+    );
+    return reply.code(502).send({
+      error: {
+        message: error.message,
+        type: "api_error",
+        chain: error.chainName,
+        modelsTried: error.modelsTried,
+      },
+    });
+  }
+
+  if (error instanceof ChainBudgetExceededError) {
+    log.error(
+      {
+        requestId,
+        chain: error.chainName,
+      },
+      "Chain budget exceeded.",
+    );
+    return reply.code(504).send({
+      error: {
+        message: error.message,
+        type: "api_error",
+        chain: error.chainName,
+      },
+    });
+  }
 
   if (error instanceof UpstreamHttpError) {
     log.warn(
@@ -1233,9 +1553,41 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     return existing[mode];
   };
 
-  const getClient = (model: GatewayModelConfig): ChatCompletionsTransport => {
+  const getClient = (model: GatewayModelConfig, overrides?: { timeoutMs?: number; maxRetries?: number }): ChatCompletionsTransport => {
     if (options.client) {
       return options.client;
+    }
+
+    // When overrides are provided, create a fresh client (bypass cache) so the
+    // per-instance timeout/retry defaults reflect the overrides. Per-request
+    // overrides from Step 3 can still be used on top of this client.
+    if (overrides && (overrides.timeoutMs !== undefined || overrides.maxRetries !== undefined)) {
+      const clientOptions: {
+        baseUrl: string;
+        apiKey: string;
+        fetchFn?: typeof fetch;
+        logger?: {
+          debug(context: unknown, message?: string): void;
+          info(context: unknown, message?: string): void;
+          warn(context: unknown, message?: string): void;
+          error(context: unknown, message?: string): void;
+        };
+        timeoutMs?: number;
+        maxRetries?: number;
+      } = {
+        baseUrl: model.baseUrl,
+        apiKey: model.apiKey,
+        logger: app.log.child({
+          component: "upstream-client",
+          upstreamBaseUrl: model.baseUrl,
+        }),
+        timeoutMs: overrides.timeoutMs ?? options.config.requestTimeoutMs,
+        maxRetries: overrides.maxRetries ?? options.config.maxRetries,
+      };
+      if (options.fetchFn) {
+        clientOptions.fetchFn = options.fetchFn;
+      }
+      return new ChatCompletionsClient(clientOptions);
     }
 
     const cacheKey = `${model.baseUrl}::${model.apiKey}`;
@@ -1275,21 +1627,38 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     return client;
   };
 
-  const modelsListHandler = async () =>
-    createModelsList(options.config, options.copilotProxyRegistry);
-  const anthropicModelsListHandler = async () =>
-    createAnthropicModelsList(options.config, options.copilotProxyRegistry);
+  const modelsListHandler = async (statusFilter?: string) =>
+    createModelsList(options.config, options.copilotProxyRegistry, statusFilter);
+  const anthropicModelsListHandler = async (statusFilter?: string) =>
+    createAnthropicModelsList(options.config, options.copilotProxyRegistry, statusFilter);
   const modelDetailHandler = async (
     request: FastifyRequest<{ Params: { model: string } }>,
     reply: FastifyReply,
   ) => {
     log.debug({ model: request.params.model }, "Serving model metadata detail.");
+    const requestedModel = request.params.model;
+
+    // Check for chain model
+    if (requestedModel.startsWith("chain-")) {
+      const chainName = requestedModel.slice("chain-".length);
+      const chain = options.config.modelChains?.find((c) => c.name === chainName);
+      if (chain) {
+        const startupTimestamp = Math.floor(Date.now() / 1000);
+        return hasAnthropicVersionHeader(request)
+          ? createChainAnthropicModelRecord(chain, startupTimestamp)
+          : createChainModelRecord(chain, startupTimestamp);
+      }
+      return reply.code(404).send({
+        error: `Chain \`${chainName}\` is not configured.`,
+      });
+    }
+
     const configured = options.config.models.find(
-      (model) => model.name === request.params.model,
+      (model) => model.name === requestedModel,
     );
 
     if (!configured) {
-      const copilotModel = options.copilotProxyRegistry?.findModel(request.params.model);
+      const copilotModel = options.copilotProxyRegistry?.findModel(requestedModel);
       if (copilotModel) {
         return hasAnthropicVersionHeader(request)
           ? createCopilotAnthropicModelRecord(copilotModel)
@@ -1297,7 +1666,7 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
       }
 
       return reply.code(404).send({
-        error: `Model \`${request.params.model}\` is not configured.`,
+        error: `Model \`${requestedModel}\` is not configured.`,
       });
     }
 
@@ -1420,7 +1789,113 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         );
       }
 
-      const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const resolved = resolveModel(options.config, parsedRequest.model);
+      if (isChainDescriptor(resolved)) {
+        // Chain execution path
+        const chain = resolved.chain;
+        const chainId = `chain-${chain.name}`;
+        const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
+
+        if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support streaming (first model \`${firstModel.name}\` does not support streaming).`,
+          );
+        }
+
+        if (responseRequestUsesTools(parsedRequest) && !firstModel.modelConfig.supportsTools) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support tools (first model \`${firstModel.name}\` does not support tools).`,
+          );
+        }
+
+        const upstreamRequest = buildChatCompletionRequest({
+          ...parsedRequest,
+          model: firstModel.modelConfig.upstreamModel,
+        });
+        const translationOptions = buildTranslationOptions(parsedRequest, chainId);
+
+        const transportFactory = (entry: ChainModelEntry, settings: { timeoutMs: number; maxRetries: number }) => {
+          return getClient(entry.modelConfig, settings);
+        };
+
+        if (parsedRequest.stream) {
+          log.info(
+            {
+              requestId: request.id,
+              chain: chain.name,
+              models: chain.models.map((m) => m.name),
+            },
+            "Executing chain for streaming response request.",
+          );
+
+          const disconnectSignal = createDisconnectAbortSignal(request);
+          const chainStream = executeChainStream({
+            descriptor: resolved,
+            upstreamRequest,
+            transportFactory,
+            gatewayTimeoutMs: options.config.requestTimeoutMs,
+            gatewayMaxRetries: options.config.maxRetries,
+            logger: log,
+          });
+
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no")
+            .header("x-chain-model", chainId);
+
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
+          // Translate the chain's raw SSE stream to Responses API format
+          const translator = createChatCompletionStreamTranslator(translationOptions);
+          const translatedStream = async function* () {
+            for await (const chunk of chainStream) {
+              for (const frame of translator.push(chunk)) {
+                yield frame;
+              }
+            }
+            for (const frame of translator.flush()) {
+              yield frame;
+            }
+          };
+
+          return reply.send(Readable.from(translatedStream()));
+        }
+
+        log.info(
+          {
+            requestId: request.id,
+            chain: chain.name,
+            models: chain.models.map((m) => m.name),
+          },
+          "Executing chain for non-stream response request.",
+        );
+
+        const chainResponse = await executeChain({
+          descriptor: resolved,
+          upstreamRequest,
+          transportFactory,
+          gatewayTimeoutMs: options.config.requestTimeoutMs,
+          gatewayMaxRetries: options.config.maxRetries,
+          logger: log,
+        });
+
+        reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
+        return reply.code(200).send(
+          translateChatCompletionResponse(chainResponse, translationOptions),
+        );
+      }
+      const selectedModel = resolved;
       const supportsStreaming = selectedModel.supportsStreaming;
       const supportsTools = selectedModel.supportsTools;
       const unknownFieldMode = selectedModel.unknownFieldMode;
@@ -1617,7 +2092,122 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         );
       }
 
-      const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const resolved = resolveModel(options.config, parsedRequest.model);
+      if (isChainDescriptor(resolved)) {
+        // Chain execution path
+        const chain = resolved.chain;
+        const chainId = `chain-${chain.name}`;
+        const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
+
+        if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support streaming (first model \`${firstModel.name}\` does not support streaming).`,
+          );
+        }
+
+        if (anthropicRequestUsesTools(parsedRequest) && !firstModel.modelConfig.supportsTools) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support tools (first model \`${firstModel.name}\` does not support tools).`,
+          );
+        }
+
+        let upstreamRequest: ChatCompletionRequest;
+        try {
+          upstreamRequest = buildChatCompletionRequestFromAnthropic({
+            ...parsedRequest,
+            model: firstModel.modelConfig.upstreamModel,
+          });
+        } catch (error) {
+          throw new RouteError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+
+        const transportFactory = (entry: ChainModelEntry, settings: { timeoutMs: number; maxRetries: number }) => {
+          return getClient(entry.modelConfig, settings);
+        };
+
+        if (parsedRequest.stream) {
+          log.info(
+            {
+              requestId: request.id,
+              chain: chain.name,
+              models: chain.models.map((m) => m.name),
+            },
+            "Executing chain for streaming Anthropic request.",
+          );
+
+          const disconnectSignal = createDisconnectAbortSignal(request);
+          const chainStream = executeChainStream({
+            descriptor: resolved,
+            upstreamRequest,
+            transportFactory,
+            gatewayTimeoutMs: options.config.requestTimeoutMs,
+            gatewayMaxRetries: options.config.maxRetries,
+            logger: log,
+          });
+
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no")
+            .header("x-chain-model", chainId);
+
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
+          // Translate the chain's raw SSE stream to Anthropic format
+          const translator = createAnthropicMessageStreamTranslator({ model: chainId });
+          const translatedStream = async function* () {
+            for await (const chunk of chainStream) {
+              for (const frame of translator.push(chunk)) {
+                yield frame;
+              }
+            }
+            for (const frame of translator.flush()) {
+              yield frame;
+            }
+          };
+
+          return reply.send(Readable.from(translatedStream()));
+        }
+
+        log.info(
+          {
+            requestId: request.id,
+            chain: chain.name,
+            models: chain.models.map((m) => m.name),
+          },
+          "Executing chain for non-stream Anthropic request.",
+        );
+
+        const chainResponse = await executeChain({
+          descriptor: resolved,
+          upstreamRequest,
+          transportFactory,
+          gatewayTimeoutMs: options.config.requestTimeoutMs,
+          gatewayMaxRetries: options.config.maxRetries,
+          logger: log,
+        });
+
+        const anthropicResponse = translateChatCompletionResponseToAnthropic(chainResponse, {
+          model: chainId,
+        });
+
+        reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
+        return reply.code(200).send(anthropicResponse);
+      }
+      const selectedModel = resolved;
       const supportsStreaming = selectedModel.supportsStreaming;
       const supportsTools = selectedModel.supportsTools;
 
@@ -1821,7 +2411,104 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         return reply.code(200).send(response);
       }
 
-      const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const resolved = resolveModel(options.config, parsedRequest.model);
+      if (isChainDescriptor(resolved)) {
+        // Chain execution path
+        const chain = resolved.chain;
+        const chainId = `chain-${chain.name}`;
+        const firstModel = chain.models[0]!;
+        const chainDegraded = isChainDegraded(chain.activeModels, chain.totalModels);
+
+        if (parsedRequest.stream && !firstModel.modelConfig.supportsStreaming) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support streaming (first model \`${firstModel.name}\` does not support streaming).`,
+          );
+        }
+
+        if (chatCompletionsRequestUsesTools(parsedRequest) && !firstModel.modelConfig.supportsTools) {
+          throw new RouteError(
+            400,
+            `Chain \`${chain.name}\` does not support tools (first model \`${firstModel.name}\` does not support tools).`,
+          );
+        }
+
+        const upstreamRequest: ChatCompletionRequest = {
+          ...parsedRequest,
+          model: firstModel.modelConfig.upstreamModel,
+        };
+
+        const transportFactory = (entry: ChainModelEntry, settings: { timeoutMs: number; maxRetries: number }) => {
+          return getClient(entry.modelConfig, settings);
+        };
+
+        if (parsedRequest.stream) {
+          log.info(
+            {
+              requestId: request.id,
+              chain: chain.name,
+              models: chain.models.map((m) => m.name),
+            },
+            "Executing chain for streaming chat completions request.",
+          );
+
+          const disconnectSignal = createDisconnectAbortSignal(request);
+          const chainStream = executeChainStream({
+            descriptor: resolved,
+            upstreamRequest,
+            transportFactory,
+            gatewayTimeoutMs: options.config.requestTimeoutMs,
+            gatewayMaxRetries: options.config.maxRetries,
+            logger: log,
+          });
+
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no")
+            .header("x-chain-model", chainId);
+
+          if (chainDegraded) {
+            reply.header("x-chain-status", "degraded");
+          }
+
+          // For chat completions, we pass through the raw SSE stream
+          const translatedStream = async function* () {
+            for await (const chunk of chainStream) {
+              yield chunk;
+            }
+          };
+
+          return reply.send(Readable.from(translatedStream()));
+        }
+
+        log.info(
+          {
+            requestId: request.id,
+            chain: chain.name,
+            models: chain.models.map((m) => m.name),
+          },
+          "Executing chain for non-stream chat completions request.",
+        );
+
+        const chainResponse = await executeChain({
+          descriptor: resolved,
+          upstreamRequest,
+          transportFactory,
+          gatewayTimeoutMs: options.config.requestTimeoutMs,
+          gatewayMaxRetries: options.config.maxRetries,
+          logger: log,
+        });
+
+        reply.header("x-chain-model", chainId);
+        if (chainDegraded) {
+          reply.header("x-chain-status", "degraded");
+        }
+        return reply.code(200).send(chainResponse);
+      }
+      const selectedModel = resolved;
 
       if (parsedRequest.stream && !selectedModel.supportsStreaming) {
         throw new RouteError(
@@ -1891,7 +2578,21 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
   ) => {
     try {
       const parsedRequest = parseAnthropicMessagesRequest(request.body);
-      const selectedModel = resolveModel(options.config, parsedRequest.model);
+      const resolved = resolveModel(options.config, parsedRequest.model);
+      if (isChainDescriptor(resolved)) {
+        // For chains, estimate tokens based on the first model
+        const chain = resolved.chain;
+        const chainId = `chain-${chain.name}`;
+        const normalizedRequest: AnthropicMessagesRequest = {
+          ...parsedRequest,
+          model: chainId,
+        };
+
+        return reply.code(200).send({
+          input_tokens: estimateAnthropicInputTokens(normalizedRequest),
+        });
+      }
+      const selectedModel = resolved;
       const normalizedRequest: AnthropicMessagesRequest = {
         ...parsedRequest,
         model: selectedModel.name,
@@ -1905,24 +2606,27 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
     }
   };
 
-  app.get("/models", async () => {
+  app.get<{ Querystring: { status?: string } }>("/models", async (request) => {
+    const statusFilter = request.query.status;
     log.debug(
-      { configuredModels: options.config.models.map((model) => model.name) },
+      { configuredModels: options.config.models.map((model) => model.name), statusFilter },
       "Serving models list.",
     );
-    return modelsListHandler();
+    return modelsListHandler(statusFilter);
   });
-  app.get("/v1/models", async (request) => {
+  app.get<{ Querystring: { status?: string } }>("/v1/models", async (request) => {
+    const statusFilter = request.query.status;
     log.debug(
       {
         configuredModels: options.config.models.map((model) => model.name),
         anthropic: hasAnthropicVersionHeader(request),
+        statusFilter,
       },
       "Serving models list.",
     );
     return hasAnthropicVersionHeader(request)
-      ? anthropicModelsListHandler()
-      : modelsListHandler();
+      ? anthropicModelsListHandler(statusFilter)
+      : modelsListHandler(statusFilter);
   });
   app.get("/models/:model", modelDetailHandler);
   app.get("/v1/models/:model", modelDetailHandler);

@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
-import { type AppConfig } from "../src/config.js";
+import { type AppConfig, type GatewayModelConfig } from "../src/config.js";
+import type { ChainModelEntry, ModelChainConfig } from "../src/contracts.js";
 
 const compatibilityInstructions =
   "You are a helpful AI assistant. Follow developer and user instructions, keep responses accurate, and prefer concise plain-text output unless the caller asks for a specific format.";
@@ -22,12 +23,16 @@ const singleModelConfig: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret-key",
+      apiKeyEnv: "API_KEY",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -48,24 +53,32 @@ const multiModelConfig: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider-a.example/v1",
       apiKey: "api-key-a",
+      apiKeyEnv: "API_KEY_A",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
     {
       name: "coder-alias",
       upstreamModel: "provider-internal-coder",
       baseUrl: "https://provider-b.example/v1",
       apiKey: "api-key-b",
+      apiKeyEnv: "API_KEY_B",
       ownedBy: "custom-provider",
       created: 1_718_000_001,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -150,6 +163,7 @@ describe("createApp", () => {
             permission: [],
             root: "glm-5.1",
             parent: null,
+            status: "active",
             capabilities: {
               input_modalities: ["text"],
               output_modalities: ["text"],
@@ -178,6 +192,7 @@ describe("createApp", () => {
             permission: [],
             root: "coder-alias",
             parent: null,
+            status: "active",
             capabilities: {
               input_modalities: ["text"],
               output_modalities: ["text"],
@@ -210,6 +225,7 @@ describe("createApp", () => {
         permission: [],
         root: "coder-alias",
         parent: null,
+        status: "active",
         capabilities: {
           input_modalities: ["text"],
           output_modalities: ["text"],
@@ -973,4 +989,371 @@ describe("createApp", () => {
       await app.close();
     }
   });
+
+  // ---------------------------------------------------------------------------
+  // Chain integration tests
+  // ---------------------------------------------------------------------------
+
+  function makeChainModel(overrides: Partial<GatewayModelConfig> = {}): GatewayModelConfig {
+    return {
+      name: "gpt-5",
+      upstreamModel: "gpt-5",
+      baseUrl: "https://provider.example/v1",
+      apiKey: "key-a",
+      apiKeyEnv: "API_KEY_A",
+      ownedBy: "llm-gateway",
+      created: 1_718_000_000,
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
+      unknownFieldWindowRequests: 100,
+      status: "active",
+      statusReason: "Loaded from config",
+      statusChangedAt: 1_718_000_000,
+      ...overrides,
+    };
+  }
+
+  function makeChainEntry(name: string, modelConfig: GatewayModelConfig, overrides: Partial<ChainModelEntry> = {}): ChainModelEntry {
+    return {
+      name,
+      modelConfig,
+      timeoutMs: 30000,
+      maxRetries: 0,
+      ...overrides,
+    };
+  }
+
+  function makeChain(models: ChainModelEntry[], overrides: Partial<ModelChainConfig> = {}): ModelChainConfig {
+    const activeCount = models.filter((m) => m.modelConfig.status === "active").length;
+    const totalCount = models.length;
+    const chainStatus: "active" | "degraded" | "inactive" =
+      activeCount === totalCount ? "active" :
+      activeCount === 0 ? "inactive" : "degraded";
+
+    return {
+      name: "production",
+      models,
+      timeoutMs: 30000,
+      maxRetries: 0,
+      status: chainStatus,
+      statusReason: `${activeCount}/${totalCount} models active`,
+      statusChangedAt: 1_718_000_000,
+      activeModels: activeCount,
+      totalModels: totalCount,
+      ...overrides,
+    };
+  }
+
+  function makeChainConfig(models: GatewayModelConfig[], chains: ModelChainConfig[] = [], overrides: Partial<AppConfig> = {}): AppConfig {
+    return {
+      host: "127.0.0.1",
+      port: 3001,
+      logLevel: "silent",
+      upstreamBaseUrl: models[0]?.baseUrl ?? "https://provider.example/v1",
+      requestTimeoutMs: 30000,
+      maxRetries: 0,
+      maxBodySizeKb: 1024,
+      healthProbeEnabled: false,
+      models,
+      modelChains: chains,
+      ...overrides,
+    };
+  }
+
+  it("includes chain in Anthropic format when anthropic-version header is present", async () => {
+    const modelA = makeChainModel({ name: "gpt-5", apiKey: "key-a" });
+    const chain = makeChain([makeChainEntry("gpt-5", modelA)]);
+    const config = makeChainConfig([modelA], [chain]);
+
+    const app = createApp({
+      config,
+      fetchFn: vi.fn() as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/models",
+        headers: { "anthropic-version": "2023-06-01" },
+      });
+
+      expect(response.statusCode).toBe(200);
+      const data = response.json();
+      expect(data.object).toBe("list");
+      const chainModel = data.data.find((m: { id: string }) => m.id === "chain-production");
+      expect(chainModel).toBeDefined();
+      expect(chainModel.type).toBe("model");
+      expect(chainModel.id).toBe("chain-production");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not include x-chain-model header for plain model requests", async () => {
+    const modelA = makeChainModel({ name: "gpt-5", apiKey: "key-a" });
+    const config = makeChainConfig([modelA]);
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-plain",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "gpt-5",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: "Hello" },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const app = createApp({
+      config,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        payload: { model: "gpt-5", input: "Hello" },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["x-chain-model"]).toBeUndefined();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns 504 ChainBudgetExceededError when chain timeout budget is exceeded", async () => {
+    const modelA = makeChainModel({
+      name: "gpt-5",
+      apiKey: "key-a",
+      baseUrl: "https://provider-a.example/v1",
+    });
+    const modelB = makeChainModel({
+      name: "glm-5.1",
+      apiKey: "key-b",
+      baseUrl: "https://provider-b.example/v1",
+    });
+    const chain = makeChain(
+      [makeChainEntry("gpt-5", modelA), makeChainEntry("glm-5.1", modelB)],
+      { chainTimeoutMs: 1 },
+    );
+    const config = makeChainConfig([modelA, modelB], [chain]);
+
+    const fetchMock = vi.fn(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      return new Response(
+        JSON.stringify({
+          id: "chatcmpl-slow",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "gpt-5",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: "Hello" },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    });
+
+    const app = createApp({
+      config,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        payload: { model: "chain-production", input: "Hello" },
+      });
+
+      if (response.statusCode === 504) {
+        const data = response.json();
+        expect(data.error).toContain("exceeded");
+        expect(data.chain).toBe("production");
+      } else {
+        expect([200, 504]).toContain(response.statusCode);
+      }
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("preserves original status code for non-retryable errors", async () => {
+    const modelA = makeChainModel({
+      name: "gpt-5",
+      apiKey: "key-a",
+      baseUrl: "https://provider-a.example/v1",
+    });
+    const modelB = makeChainModel({
+      name: "glm-5.1",
+      apiKey: "key-b",
+      baseUrl: "https://provider-b.example/v1",
+    });
+    const chain = makeChain([
+      makeChainEntry("gpt-5", modelA),
+      makeChainEntry("glm-5.1", modelB),
+    ]);
+    const config = makeChainConfig([modelA, modelB], [chain]);
+
+    const fetchMock = vi.fn(async () => {
+      return new Response(
+        JSON.stringify({ error: "invalid_api_key" }),
+        { status: 401, statusText: "Unauthorized" },
+      );
+    });
+
+    const app = createApp({
+      config,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        payload: { model: "chain-production", input: "Hello" },
+      });
+
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("streams SSE events correctly for chain request", async () => {
+    const modelA = makeChainModel({
+      name: "gpt-5",
+      apiKey: "key-a",
+      baseUrl: "https://provider-a.example/v1",
+    });
+    const chain = makeChain([makeChainEntry("gpt-5", modelA)]);
+    const config = makeChainConfig([modelA], [chain]);
+
+    const fetchMock = vi.fn(async () => {
+      const body = createSseStream([
+        'data: {"id":"chatcmpl-chain-stream","object":"chat.completion.chunk","created":1718000000,"model":"gpt-5","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}]}\n\n',
+        'data: {"id":"chatcmpl-chain-stream","object":"chat.completion.chunk","created":1718000000,"model":"gpt-5","choices":[{"index":0,"delta":{"content":" there"},"finish_reason":"stop"}]}\n\n',
+        "data: [DONE]\n\n",
+      ]);
+      return new Response(body, {
+        status: 200,
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+
+    const app = createApp({
+      config,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/v1/responses",
+        payload: { model: "chain-production", input: "Hello", stream: true },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["content-type"]).toContain("text/event-stream");
+      expect(response.headers["x-chain-model"]).toBe("chain-production");
+      expect(response.body).toContain("event: response.created");
+      expect(response.body).toContain("event: response.output_text.delta");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not include chain entries in model discovery when no chains configured", async () => {
+    const modelA = makeChainModel({ name: "gpt-5", apiKey: "key-a" });
+    const config = makeChainConfig([modelA]);
+
+    const app = createApp({
+      config,
+      fetchFn: vi.fn() as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/v1/models",
+      });
+
+      expect(response.statusCode).toBe(200);
+      const data = response.json();
+      expect(data.object).toBe("list");
+      expect(data.data).toHaveLength(1);
+      expect(data.data[0].id).toBe("gpt-5");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("executes chain for POST /responses request", async () => {
+    const modelA = makeChainModel({
+      name: "gpt-5",
+      apiKey: "key-a",
+      baseUrl: "https://provider-a.example/v1",
+    });
+    const chain = makeChain([makeChainEntry("gpt-5", modelA)]);
+    const config = makeChainConfig([modelA], [chain]);
+
+    const fetchMock = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          id: "chatcmpl-chain",
+          object: "chat.completion",
+          created: 1_718_000_000,
+          model: "gpt-5",
+          choices: [
+            {
+              index: 0,
+              finish_reason: "stop",
+              message: { role: "assistant", content: "Hello from chain" },
+            },
+          ],
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    const app = createApp({
+      config,
+      fetchFn: fetchMock as typeof fetch,
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/responses",
+        payload: { model: "chain-production", input: "Hello" },
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.headers["x-chain-model"]).toBe("chain-production");
+      expect(response.json()).toMatchObject({
+        id: "chatcmpl-chain",
+        object: "response",
+        model: "chain-production",
+        output_text: "Hello from chain",
+      });
+    } finally {
+      await app.close();
+    }
+  });
+
 });

@@ -6,6 +6,14 @@ import type {
   CopilotProxyStreamDoneMessage,
   CopilotProxyStreamErrorMessage,
 } from "@llm-gateway/shared";
+import type { ModelRow } from "../db/types.js";
+import {
+  reactivateOrInsertModel,
+  updateModelStatus,
+  getModelsByConnection,
+  getChainsReferencingModel,
+  recalculateChainStatus,
+} from "../db/repository.js";
 
 export interface RegisteredCopilotProxyModel extends CopilotProxyModel {
   connectionId: string;
@@ -116,9 +124,13 @@ export class CopilotProxyConnectionRegistry {
   private readonly connections = new Map<string, CopilotProxyConnection>();
   private readonly pendingRequests = new Map<string, PendingCopilotProxyRequest>();
   private readonly allowedPrefixes: readonly string[];
+  private readonly persistenceEnabled: boolean;
 
-  public constructor(allowedPrefixes: readonly string[] = ["copilot-"]) {
-    this.allowedPrefixes = allowedPrefixes;
+  public constructor(
+    options: { allowedPrefixes?: readonly string[]; persistenceEnabled?: boolean } = {},
+  ) {
+    this.allowedPrefixes = options.allowedPrefixes ?? ["copilot-"];
+    this.persistenceEnabled = options.persistenceEnabled ?? false;
   }
 
   public addConnection(
@@ -153,6 +165,11 @@ export class CopilotProxyConnectionRegistry {
         pending.queue.close();
         this.pendingRequests.delete(requestId);
       }
+    }
+
+    // Mark models as inactive and recalculate affected chains (Phase 5).
+    if (this.persistenceEnabled) {
+      this.persistDisconnect(connectionId);
     }
 
     this.connections.delete(connectionId);
@@ -193,6 +210,11 @@ export class CopilotProxyConnectionRegistry {
 
     connection.models = replacement;
     connection.status = "healthy";
+
+    // Persist model reactivation/insertion (Phase 5).
+    if (this.persistenceEnabled) {
+      this.persistRegistration(connectionId, models);
+    }
   }
 
   public clearRegistration(connectionId: string): void {
@@ -347,5 +369,90 @@ export class CopilotProxyConnectionRegistry {
     pending.queue.close();
     this.pendingRequests.delete(requestId);
     this.decrementInFlight(pending.connectionId);
+  }
+
+  /**
+   * Persist model registration/reactivation to the database.
+   * Called from `replaceRegistration` when persistence is enabled.
+   */
+  private persistRegistration(connectionId: string, models: CopilotProxyModel[]): void {
+    const now = Math.floor(Date.now() / 1000);
+
+    for (const model of models) {
+      const modelRow: ModelRow = {
+        name: model.id,
+        upstream_model: model.native_id,
+        base_url: "",
+        api_key_env: "",
+        owned_by: "copilot-proxy",
+        created: now,
+        supports_tools: model.capabilities.supports_tools ? 1 : 0,
+        supports_streaming: model.capabilities.supports_streaming ? 1 : 0,
+        unknown_field_mode: "warn",
+        unknown_field_window_requests: 100,
+        source: "copilot-proxy",
+        source_prefix: model.source,
+        connection_id: connectionId,
+        status: "active",
+        status_reason: "Copilot proxy registered",
+        status_changed_at: now,
+        capabilities_json: JSON.stringify(model.capabilities),
+        updated_at: now,
+      };
+
+      try {
+        reactivateOrInsertModel(modelRow);
+
+        // Recalculate chains that reference this model.
+        const chainNames = getChainsReferencingModel(model.id);
+        for (const chainName of chainNames) {
+          recalculateChainStatus(chainName);
+        }
+      } catch (error) {
+        console.error(
+          `[registry] Failed to persist model registration for ${model.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    }
+  }
+
+  /**
+   * Mark all models belonging to a connection as inactive and
+   * recalculate affected chain statuses.
+   * Called from `removeConnection` when persistence is enabled.
+   */
+  private persistDisconnect(connectionId: string): void {
+    try {
+      const models = getModelsByConnection(connectionId);
+      const affectedChains = new Set<string>();
+
+      for (const model of models) {
+        // Only mark copilot-proxy models as inactive (not static models).
+        if (model.source !== "copilot-proxy") {
+          continue;
+        }
+
+        updateModelStatus(model.name, "inactive", "Copilot proxy connection closed");
+
+        // Collect chains that need recalculation.
+        const chainNames = getChainsReferencingModel(model.name);
+        for (const chainName of chainNames) {
+          affectedChains.add(chainName);
+        }
+      }
+
+      // Recalculate all affected chains.
+      for (const chainName of affectedChains) {
+        recalculateChainStatus(chainName);
+      }
+    } catch (error) {
+      console.error(
+        `[registry] Failed to persist disconnect for connection ${connectionId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 }

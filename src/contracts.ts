@@ -1,3 +1,23 @@
+export interface ChainModelEntry {
+  name: string;
+  modelConfig: import("./config.js").GatewayModelConfig;
+  timeoutMs: number;
+  maxRetries: number;
+}
+
+export interface ModelChainConfig {
+  name: string;
+  models: ChainModelEntry[];
+  timeoutMs: number;
+  maxRetries: number;
+  chainTimeoutMs?: number;
+  status: string;
+  statusReason: string | null;
+  statusChangedAt: number | null;
+  activeModels: number;
+  totalModels: number;
+}
+
 export type ResponseRole = "user" | "assistant" | "system" | "developer";
 export type ContentRole = "input_text" | "output_text";
 

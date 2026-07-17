@@ -1,15 +1,29 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { describe, expect, it } from "vitest";
+
+import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import { loadConfig } from "../src/config.js";
+import { closeDatabase } from "../src/db/index.js";
+
+let tempDir: string;
+
+beforeEach(() => {
+  closeDatabase();
+  tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
+});
+
+afterEach(() => {
+  closeDatabase();
+  rmSync(tempDir, { recursive: true, force: true });
+});
 
 describe("loadConfig", () => {
   it("loads a multi-provider YAML catalog and resolves api_key_env references", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
     const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -28,45 +42,46 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
-        HOST: "127.0.0.1",
-        PORT: "4000",
-        GATEWAY_CONFIG_PATH: configPath,
-        GLM_API_KEY: "api-key-a",
-        CODER_API_KEY: "api-key-b",
-      });
+    const config = loadConfig({
+      HOST: "127.0.0.1",
+      PORT: "4000",
+      GATEWAY_CONFIG_PATH: configPath,
+      GATEWAY_DB_PATH: dbPath,
+      GLM_API_KEY: "api-key-a",
+      CODER_API_KEY: "api-key-b",
+    });
 
-      expect(config.host).toBe("127.0.0.1");
-      expect(config.port).toBe(4000);
-      expect(config.logLevel).toBe("info");
-      expect(config.defaultModel).toBe("glm-5.1");
-      expect(config.upstreamBaseUrl).toBe("https://provider-a.example/v1");
-      expect(config.models).toMatchObject([
-        {
-          name: "glm-5.1",
-          upstreamModel: "glm-5.1",
-          baseUrl: "https://provider-a.example/v1",
-          apiKey: "api-key-a",
-          ownedBy: "zhipu",
-          supportsTools: true,
-          supportsStreaming: true,
-          unknownFieldMode: "warn",
-        },
-        {
-          name: "coder-alias",
-          upstreamModel: "provider-internal-coder",
-          baseUrl: "https://provider-b.example/v1",
-          apiKey: "api-key-b",
-          ownedBy: "custom-provider",
-          supportsTools: true,
-          supportsStreaming: true,
-          unknownFieldMode: "warn",
-        },
-      ]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+    expect(config.host).toBe("127.0.0.1");
+    expect(config.port).toBe(4000);
+    expect(config.logLevel).toBe("info");
+    expect(config.defaultModel).toBe("glm-5.1");
+    expect(config.upstreamBaseUrl).toBe("https://provider-a.example/v1");
+    expect(config.models).toHaveLength(2);
+    // Models are sorted alphabetically by name from the database
+    const glmModel = config.models.find((m) => m.name === "glm-5.1")!;
+    const coderModel = config.models.find((m) => m.name === "coder-alias")!;
+    expect(glmModel).toMatchObject({
+      name: "glm-5.1",
+      upstreamModel: "glm-5.1",
+      baseUrl: "https://provider-a.example/v1",
+      apiKey: "api-key-a",
+      ownedBy: "zhipu",
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
+      status: "active",
+    });
+    expect(coderModel).toMatchObject({
+      name: "coder-alias",
+      upstreamModel: "provider-internal-coder",
+      baseUrl: "https://provider-b.example/v1",
+      apiKey: "api-key-b",
+      ownedBy: "custom-provider",
+      supportsTools: true,
+      supportsStreaming: true,
+      unknownFieldMode: "warn",
+      status: "active",
+    });
   });
 
   it("requires GATEWAY_CONFIG_PATH and no longer uses legacy upstream env vars", () => {
@@ -82,8 +97,8 @@ models:
   });
 
   it("rejects inline api_key values in the YAML catalog", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -96,22 +111,19 @@ models:
       "utf8",
     );
 
-    try {
-      expect(() =>
+          expect(() =>
         loadConfig({
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         }),
       ).toThrowError(/Inline api_key values are not supported/);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("rejects invalid unknown_field_mode enum values", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -124,23 +136,20 @@ models:
       "utf8",
     );
 
-    try {
-      expect(() =>
+          expect(() =>
         loadConfig({
           HOST: "127.0.0.1",
           PORT: "4000",
           GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
           GLM_API_KEY: "api-key-a",
         }),
       ).toThrowError();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads gateway_auth_token_env and resolves the token from env", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -153,24 +162,21 @@ gateway_auth_token_env: GATEWAY_AUTH_TOKEN
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
         GATEWAY_AUTH_TOKEN: "my-secret-token",
       });
 
       expect(config.gatewayAuthToken).toBe("my-secret-token");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("skips gatewayAuthToken when the env var is empty or missing", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -183,24 +189,21 @@ gateway_auth_token_env: GATEWAY_AUTH_TOKEN
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
         // GATEWAY_AUTH_TOKEN is intentionally omitted
       });
 
       expect(config.gatewayAuthToken).toBeUndefined();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads health_probe_enabled from YAML with default of false", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -212,23 +215,20 @@ gateway_auth_token_env: GATEWAY_AUTH_TOKEN
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.healthProbeEnabled).toBe(false);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads health_probe_enabled: true from YAML", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -241,23 +241,20 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.healthProbeEnabled).toBe(true);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads cors_origin as a single string", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -270,23 +267,20 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.corsOrigin).toBe("http://localhost:5173");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads cors_origin as an array of strings", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -301,23 +295,20 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.corsOrigin).toEqual(["http://localhost:5173", "https://admin.example.com"]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads cors_origin as wildcard string", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -330,23 +321,20 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.corsOrigin).toBe("*");
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("does not set corsOrigin when not configured", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -358,23 +346,20 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.corsOrigin).toBeUndefined();
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads Copilot proxy config with disabled defaults", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -386,11 +371,11 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
@@ -403,14 +388,11 @@ models:
         maxInflightPerConnection: 4,
         allowedPrefixes: ["copilot-"],
       });
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads custom Copilot proxy config", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -428,11 +410,11 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
@@ -445,14 +427,11 @@ models:
         maxInflightPerConnection: 2,
         allowedPrefixes: ["copilot-"],
       });
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+      });
 
   it("loads copilot_proxy_allowed_prefixes from YAML", () => {
-    const tempDir = mkdtempSync(join(tmpdir(), "llm-gateway-config-"));
-    const configPath = join(tempDir, "gateway.config.yaml");
+        const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
 
     writeFileSync(
       configPath,
@@ -468,17 +447,334 @@ models:
       "utf8",
     );
 
-    try {
-      const config = loadConfig({
+          const config = loadConfig({
         HOST: "127.0.0.1",
         PORT: "4000",
         GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
         GLM_API_KEY: "api-key-a",
       });
 
       expect(config.copilotProxy?.allowedPrefixes).toEqual(["copilot-", "alazyer-"]);
-    } finally {
-      rmSync(tempDir, { recursive: true, force: true });
-    }
+      });
+
+  // ---------------------------------------------------------------------------
+  // Chain config validation tests
+  // ---------------------------------------------------------------------------
+
+  const chainBaseEnv = {
+    HOST: "127.0.0.1",
+    PORT: "4000",
+    GLM_API_KEY: "api-key-a",
+    GPT_API_KEY: "api-key-b",
+  };
+
+  const twoModelsYaml = `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+`;
+
+  describe("chain config validation", () => {
+    it("parses valid chain config successfully", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
+
+        expect(config.modelChains).toHaveLength(1);
+        const chain = config.modelChains![0]!;
+        expect(chain.name).toBe("production");
+        expect(chain.models).toHaveLength(2);
+        expect(chain.models[0]!.name).toBe("gpt-5");
+        expect(chain.models[1]!.name).toBe("glm-5.1");
+        expect(chain.timeoutMs).toBe(30000); // gateway default
+        expect(chain.maxRetries).toBe(0); // gateway default
+          });
+
+    it("rejects chain with non-existent model reference with startup validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - nonexistent-model
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/not present in the configured model catalog/);
+          });
+
+    it("rejects chain name matching a model name with startup validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: glm-5.1
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/Chain name "glm-5\.1" conflicts with a configured model name/);
+          });
+
+    it("rejects chain-<name> matching a model name with startup validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `models:
+  - name: chain-fallback
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+model_chains:
+  - name: fallback
+    models:
+      - gpt-5
+`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/Chain identifier "chain-fallback" conflicts with a configured model name/);
+          });
+
+    it("rejects duplicate chain names with startup validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+  - name: production
+    models:
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/Duplicate chain name "production"/);
+          });
+
+    it("rejects chain referencing chain-<name> in models list with startup validation error (nesting)", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models:
+      - gpt-5
+  - name: fallback
+    models:
+      - chain-production
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/Chain nesting is not supported/);
+          });
+
+    it("rejects chain referencing copilot-prefixed model with startup validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `models:
+  - name: copilot-gpt-4o
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+model_chains:
+  - name: production
+    models:
+      - copilot-gpt-4o
+`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/Copilot-proxied models cannot be used in chains/);
+          });
+
+    it("rejects empty models list with Zod validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: production
+    models: []
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError();
+          });
+
+    it("rejects empty chain name with Zod validation error", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains:
+  - name: ""
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError();
+          });
+
+    it("accepts config with optional model_chains section omitted (backward compatible)", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(configPath, twoModelsYaml, "utf8");
+
+              const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
+
+        expect(config.modelChains).toEqual([]);
+          });
+
+    it("accepts config with empty model_chains array", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `model_chains: []
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
+
+        expect(config.modelChains).toEqual([]);
+          });
+
+    it("accepts default_model set to chain-<name> when chain exists", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `default_model: chain-production
+model_chains:
+  - name: production
+    models:
+      - gpt-5
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
+
+        expect(config.defaultModel).toBe("chain-production");
+          });
+
+    it("rejects default_model set to chain-<name> when chain does not exist", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `default_model: chain-nonexistent
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              expect(() =>
+          loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath }),
+        ).toThrowError(/not present in the configured model catalog or model chains/);
+          });
+
+    it("resolves per-model overrides correctly in AppConfig output", () => {
+            const configPath = join(tempDir, "gateway.config.yaml");
+    const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `request_timeout_ms: 15000
+max_retries: 0
+model_chains:
+  - name: production
+    timeout_ms: 45000
+    max_retries: 1
+    models:
+      - name: gpt-5
+        timeout_ms: 60000
+        max_retries: 3
+      - glm-5.1
+${twoModelsYaml}`,
+        "utf8",
+      );
+
+              const config = loadConfig({ ...chainBaseEnv, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
+
+        const chain = config.modelChains![0]!;
+        // Model override wins over chain default
+        expect(chain.models[0]!.timeoutMs).toBe(60000);
+        expect(chain.models[0]!.maxRetries).toBe(3);
+        // Chain default wins over gateway default
+        expect(chain.models[1]!.timeoutMs).toBe(45000);
+        expect(chain.models[1]!.maxRetries).toBe(1);
+        // Chain-level settings
+        expect(chain.timeoutMs).toBe(45000);
+        expect(chain.maxRetries).toBe(1);
+          });
   });
 });
+
+
