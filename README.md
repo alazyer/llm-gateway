@@ -18,20 +18,63 @@
 - Exposes `GET /healthz` for basic runtime checks
 - Optionally enforces gateway auth, CORS, request-size limits, retries, timeouts, and upstream health probing
 - Advertises compatibility metadata such as `personality`, `model_messages`, and `base_instructions` on model records
+- Persists models, model chains, and runtime state to SQLite for durability across restarts
 
 ## Configuration
 
-The gateway uses a YAML model catalog as the only model-configuration path.
+The gateway uses SQLite for persistence. On first startup, it seeds the database from `gateway.config.yaml`. After seeding, the database is the source of truth and the YAML file is not read again.
 
 Copy `.env.example` to `.env`, copy `gateway.config.example.yaml` to `gateway.config.yaml`, then set:
 
 - `HOST` - bind host, defaults to `0.0.0.0`
 - `PORT` - bind port, defaults to `3000`
 - `LOG_LEVEL` - Fastify/Pino log level, one of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`
-- `GATEWAY_CONFIG_PATH` - path to your YAML model catalog
+- `GATEWAY_CONFIG_PATH` - path to your YAML seed file (only used on first startup when database is empty)
+- `GATEWAY_DB_PATH` - path to SQLite database file, defaults to `./data/gateway.db`
 - provider secret env vars referenced by `api_key_env` in the YAML file
 
 Keep actual secrets in your shell or `.env`, not in tracked YAML files. The recommended `gateway.config.yaml` file is local-only and gitignored.
+
+### Database persistence
+
+The gateway persists all configuration and runtime state to SQLite:
+
+- **Models**: Static models from YAML (`source='static'`) and Copilot proxy models (`source='copilot-proxy'`)
+- **Model chains**: Chain definitions and their model membership
+- **Gateway config**: Top-level settings (default_model, timeouts, CORS, etc.)
+- **Model status**: Each model has a status (`active` or `inactive`) that persists across restarts
+
+On first startup (no database exists), the gateway:
+
+1. Creates the database at `GATEWAY_DB_PATH` (default: `./data/gateway.db`)
+2. Applies schema migrations
+3. Seeds from `gateway.config.yaml` (validated before persisting)
+4. Starts serving requests
+
+On subsequent startups, the gateway opens the existing database and applies any pending migrations. The YAML file is **not** re-read. To change configuration after first startup, use the admin API.
+
+#### Model lifecycle
+
+Models have a binary status: `active` or `inactive`.
+
+- **Static models** (from YAML) start as `active` and remain active unless manually deactivated via the admin API.
+- **Copilot proxy models** are `active` while their WebSocket connection is open. When the connection closes, the model is marked `inactive` (not deleted). If the same model reconnects, it is reactivated.
+
+Inactive models:
+
+- Return HTTP 503 when requested directly
+- Are skipped during chain fallback execution
+- Still appear in `/models` listings with their status
+
+#### Chain status
+
+Chain status is derived from the status of its constituent models:
+
+- `active`: All models in the chain are active
+- `degraded`: Some models are active, some are inactive
+- `inactive`: All models in the chain are inactive
+
+When a model's status changes, all chains referencing that model have their status recalculated automatically.
 
 Top-level YAML settings:
 
@@ -76,6 +119,173 @@ When `gateway_auth_token_env` is set and the referenced environment variable has
 `GET /healthz`, `GET /models`, `GET /v1/models`, and model detail routes stay public. `OPTIONS` preflight requests also skip auth.
 
 Anthropic routes return Anthropic-shaped authentication errors; OpenAI-compatible routes return OpenAI-shaped authentication errors.
+
+### Admin API
+
+Admin API endpoints provide runtime management of models and chains. All admin endpoints require gateway auth.
+
+#### List models with status
+
+```bash
+curl http://localhost:3000/admin/models \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Response includes status fields for each model:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "name": "glm-5.1",
+      "source": "static",
+      "status": "active",
+      "status_reason": null,
+      "status_changed_at": null,
+      "upstream_model": "glm-5.1",
+      "base_url": "https://...",
+      "owned_by": "beacon",
+      "supports_tools": true,
+      "supports_streaming": true
+    },
+    {
+      "name": "copilot-gpt-4o",
+      "source": "copilot-proxy",
+      "status": "inactive",
+      "status_reason": "Copilot proxy connection closed",
+      "status_changed_at": 1721234567,
+      "connection_id": null
+    }
+  ]
+}
+```
+
+Query parameters:
+
+- `?status=active` — filter to active models only
+- `?status=inactive` — filter to inactive models only
+- `?source=static` — filter to static models only
+- `?source=copilot-proxy` — filter to Copilot proxy models only
+
+#### Get single model
+
+```bash
+curl http://localhost:3000/admin/models/glm-5.1 \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+#### Activate model
+
+```bash
+curl -X POST http://localhost:3000/admin/models/glm-5.1/activate \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Sets the model to `active` with `status_reason="Manual activation"`. Recalculates status of all chains referencing this model.
+
+#### Deactivate model
+
+```bash
+curl -X POST http://localhost:3000/admin/models/glm-5.1/deactivate \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN" \
+  -H "content-type: application/json" \
+  -d '{"reason": "Scheduled maintenance"}'
+```
+
+Sets the model to `inactive` with the provided reason. Recalculates status of all chains referencing this model.
+
+#### List chains with status
+
+```bash
+curl http://localhost:3000/admin/chains \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Response includes status and model membership:
+
+```json
+{
+  "object": "list",
+  "data": [
+    {
+      "name": "primary-fallback",
+      "status": "degraded",
+      "status_reason": "1 of 2 models inactive: deepseek-v4-flash",
+      "status_changed_at": 1721234567,
+      "active_models": 1,
+      "total_models": 2,
+      "models": [
+        {"name": "glm-5.1", "status": "active", "position": 0},
+        {"name": "deepseek-v4-flash", "status": "inactive", "position": 1}
+      ]
+    }
+  ]
+}
+```
+
+Query parameters:
+
+- `?status=active` — filter to active chains only
+- `?status=degraded` — filter to degraded chains only
+- `?status=inactive` — filter to inactive chains only
+
+#### Get single chain
+
+```bash
+curl http://localhost:3000/admin/chains/primary-fallback \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+#### Gateway status summary
+
+```bash
+curl http://localhost:3000/admin/status \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Returns aggregate status:
+
+```json
+{
+  "models": {
+    "total": 5,
+    "active": 3,
+    "inactive": 2,
+    "by_source": {
+      "static": {"total": 2, "active": 2, "inactive": 0},
+      "copilot-proxy": {"total": 3, "active": 1, "inactive": 2}
+    }
+  },
+  "chains": {
+    "total": 2,
+    "active": 1,
+    "degraded": 1,
+    "inactive": 0
+  },
+  "copilot_proxy": {
+    "enabled": true,
+    "connections": 1
+  }
+}
+```
+
+#### Database info
+
+```bash
+curl http://localhost:3000/admin/database \
+  -H "Authorization: Bearer $GATEWAY_AUTH_TOKEN"
+```
+
+Returns database metadata:
+
+```json
+{
+  "path": "/data/gateway.db",
+  "schema_version": 1,
+  "size_bytes": 24576
+}
+```
 
 ### Copilot proxy
 
