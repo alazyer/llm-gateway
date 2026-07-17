@@ -106,7 +106,7 @@ export interface GatewayModelConfig {
   name: string;
   upstreamModel: string;
   baseUrl: string;
-  apiKey: string;
+  apiKey: string | undefined;
   apiKeyEnv: string;
   ownedBy: string;
   created: number;
@@ -476,13 +476,16 @@ function loadConfigFromDatabase(
   // --- Load models from database ---
   const modelRows = getAllModels();
   const models: GatewayModelConfig[] = modelRows.map((row) => {
-    const apiKey = resolveApiKey(row.api_key_env, row.name, env);
+    // Copilot-proxy models use the Copilot extension's authentication at
+    // request time — they have no static API key to resolve from the env.
+    const isCopilotProxy = row.source === "copilot-proxy";
+    const apiKey = isCopilotProxy ? undefined : resolveApiKey(row.api_key_env, row.name, env);
     return {
       name: row.name,
       upstreamModel: row.upstream_model,
       baseUrl: normalizeBaseUrl(row.base_url),
       apiKey,
-      apiKeyEnv: row.api_key_env,
+      apiKeyEnv: isCopilotProxy ? "" : row.api_key_env,
       ownedBy: row.owned_by,
       created: row.created,
       supportsTools: row.supports_tools === 1,

@@ -6,7 +6,10 @@ import { tmpdir } from "node:os";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
 import { loadConfig } from "../src/config.js";
-import { closeDatabase } from "../src/db/index.js";
+import { openDatabase, closeDatabase } from "../src/db/index.js";
+import { runMigrations } from "../src/db/migrations/index.js";
+import { allMigrations } from "../src/db/migrations/all.js";
+import { insertModel } from "../src/db/repository.js";
 
 let tempDir: string;
 
@@ -774,6 +777,129 @@ ${twoModelsYaml}`,
         expect(chain.timeoutMs).toBe(45000);
         expect(chain.maxRetries).toBe(1);
           });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Copilot-proxy model API key resolution
+  // ---------------------------------------------------------------------------
+
+  describe("copilot-proxy model API key handling", () => {
+    it("skips API key resolution for copilot-proxy models in database", () => {
+      const configPath = join(tempDir, "gateway.config.yaml");
+      const dbPath = join(tempDir, "gateway.db");
+
+      // First, seed the database with a normal YAML config (static model only).
+      writeFileSync(
+        configPath,
+        `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+        "utf8",
+      );
+
+      const env = {
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
+        GLM_API_KEY: "api-key-a",
+      };
+
+      // Seed the database.
+      loadConfig(env);
+      closeDatabase();
+
+      // Now insert a copilot-proxy model directly into the database
+      // (simulating a VS Code extension having registered the model).
+      const db = openDatabase(env);
+      runMigrations(db, allMigrations);
+
+      const now = Math.floor(Date.now() / 1000);
+      insertModel({
+        name: "copilot-gpt-4o",
+        upstream_model: "gpt-4o",
+        base_url: "",
+        api_key_env: "",
+        owned_by: "copilot-proxy",
+        created: now,
+        supports_tools: 1,
+        supports_streaming: 1,
+        unknown_field_mode: "warn",
+        unknown_field_window_requests: 100,
+        source: "copilot-proxy",
+        source_prefix: "copilot-",
+        connection_id: "test-conn-1",
+        status: "active",
+        status_reason: "Copilot proxy registered",
+        status_changed_at: now,
+        capabilities_json: null,
+        updated_at: now,
+      });
+
+      closeDatabase();
+
+      // Now load config again — the database is already populated, so
+      // loadConfigFromDatabase() is used. It should NOT throw for the
+      // copilot-proxy model that has no API key.
+      const config = loadConfig(env);
+
+      // Static model still has its API key resolved.
+      const staticModel = config.models.find((m) => m.name === "glm-5.1")!;
+      expect(staticModel.apiKey).toBe("api-key-a");
+      expect(staticModel.apiKeyEnv).toBe("GLM_API_KEY");
+
+      // Copilot-proxy model has undefined apiKey (no static key).
+      const copilotModel = config.models.find((m) => m.name === "copilot-gpt-4o")!;
+      expect(copilotModel.apiKey).toBeUndefined();
+      expect(copilotModel.apiKeyEnv).toBe("");
+      expect(copilotModel.ownedBy).toBe("copilot-proxy");
+    });
+
+    it("still requires API key for static models in database", () => {
+      const configPath = join(tempDir, "gateway.config.yaml");
+      const dbPath = join(tempDir, "gateway.db");
+
+      writeFileSync(
+        configPath,
+        `models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+`,
+        "utf8",
+      );
+
+      const env = {
+        HOST: "127.0.0.1",
+        PORT: "4000",
+        GATEWAY_CONFIG_PATH: configPath,
+        GATEWAY_DB_PATH: dbPath,
+        GLM_API_KEY: "api-key-a",
+      };
+
+      // Seed the database.
+      loadConfig(env);
+      closeDatabase();
+
+      // Modify the static model's api_key_env to point to a missing env var
+      // to simulate a misconfiguration after seeding.
+      const db2 = openDatabase(env);
+      db2.prepare(
+        "UPDATE models SET api_key_env = ? WHERE name = ?",
+      ).run("MISSING_KEY_ENV", "glm-5.1");
+      closeDatabase();
+
+      // Loading config should now throw because the static model's env var
+      // is missing.
+      expect(() =>
+        loadConfig({
+          ...env,
+          // Intentionally omit MISSING_KEY_ENV
+        }),
+      ).toThrowError(/Missing API key for model glm-5.1/);
+    });
   });
 });
 
