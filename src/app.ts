@@ -12,7 +12,11 @@ import { CopilotProxyConnectionRegistry } from "./copilot-proxy/registry.js";
 import { registerCopilotProxyWebsocket } from "./copilot-proxy/server.js";
 import { registerCorsHook } from "./cors.js";
 import { responsesRoutes } from "./routes/responses.js";
-import { adminRoutes } from "./routes/admin.js";
+import { adminWorkspacesRoutes } from "./routes/admin-workspaces.js";
+import { InMemoryWorkspaceStorage } from "./workspace/storage.js";
+import { registerWorkspaceContext } from "./workspace/context.js";
+import { registerWorkspaceAuth } from "./workspace/auth.js";
+import { registerUsageTracking } from "./workspace/usage.js";
 import type { ChatCompletionsTransport } from "./upstream/chat-completions-client.js";
 
 export interface CreateAppOptions {
@@ -30,10 +34,8 @@ export function createApp(options: CreateAppOptions) {
   const copilotProxyTokenStore = new CopilotProxyTokenStore({
     tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
   });
-  const copilotProxyRegistry = new CopilotProxyConnectionRegistry({
-    allowedPrefixes: copilotProxyConfig.allowedPrefixes,
-    persistenceEnabled: true,
-  });
+  const copilotProxyRegistry = new CopilotProxyConnectionRegistry({ allowedPrefixes: copilotProxyConfig.allowedPrefixes });
+  const workspaceStorage = new InMemoryWorkspaceStorage();
   const app = Fastify({
     bodyLimit: options.config.maxBodySizeKb * 1024,
     logger: {
@@ -55,7 +57,22 @@ export function createApp(options: CreateAppOptions) {
     registerCorsHook(app, options.config.corsOrigin);
   }
 
-  if (options.config.gatewayAuthToken) {
+  if (options.config.workspace.enabled) {
+    registerWorkspaceContext(app, {
+      storage: workspaceStorage,
+      enabled: true,
+    });
+    registerWorkspaceAuth(app, {
+      storage: workspaceStorage,
+      enabled: true,
+      gatewayAuthToken: options.config.gatewayAuthToken,
+    });
+    registerUsageTracking(app, {
+      storage: workspaceStorage,
+      enabled: true,
+    });
+  } else if (options.config.gatewayAuthToken) {
+    // When workspace is disabled, use the simpler gateway auth hook
     registerAuthHook(app, options.config.gatewayAuthToken);
   }
 
@@ -185,8 +202,12 @@ export function createApp(options: CreateAppOptions) {
 
   void app.register(responsesRoutes, routeOptions);
 
-  // Admin routes — protected by the existing auth hook (gateway_auth_token).
-  void app.register(adminRoutes);
+  if (options.config.workspace.enabled) {
+    void app.register(adminWorkspacesRoutes, {
+      storage: workspaceStorage,
+      enabled: true,
+    });
+  }
 
   return app;
 }
