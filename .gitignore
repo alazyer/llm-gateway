@@ -14,4 +14,5 @@ coverage/
 data/*.db
 data/*.db-*
 packages/*/.nuxt/
+packages/*/.output/
 packages/*/node_modules/

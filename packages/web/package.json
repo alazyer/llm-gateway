@@ -1,0 +1,25 @@
+{
+  "name": "llm-gateway-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "nuxt dev",
+    "build": "nuxt build",
+    "preview": "nuxt preview",
+    "generate": "nuxt generate",
+    "typecheck": "nuxt typecheck"
+  },
+  "dependencies": {
+    "@iconify-json/lucide": "^1.2.117",
+    "@iconify-json/simple-icons": "^1.2.90",
+    "@nuxt/ui": "^4.10.0",
+    "@nuxtjs/eslint-module": "4.1.0",
+    "@nuxtjs/tailwindcss": "6.14.0",
+    "@unhead/vue": "^3.2.1",
+    "nuxt": "^4.4.8"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
