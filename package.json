@@ -7,7 +7,7 @@
   ],
   "scripts": {
     "test": "vitest run",
-    "build": "npm run build --workspace @llm-gateway/shared && npm run build:gateway && npm run build --workspace llm-gateway-copilot-proxy",
+    "build": "pnpm --filter @llm-gateway/shared build && pnpm build:gateway && pnpm --filter llm-gateway-copilot-proxy build",
     "build:gateway": "tsc -p tsconfig.json",
     "dev": "tsx watch src/server.ts",
     "start": "node dist/server.js",
@@ -17,6 +17,7 @@
   "author": "",
   "license": "ISC",
   "type": "module",
+  "packageManager": "pnpm@10.30.3",
   "private": true,
   "dependencies": {
     "@anthropic-ai/sdk": "^0.104.1",
