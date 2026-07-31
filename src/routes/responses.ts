@@ -1,11 +1,15 @@
+import { randomUUID } from "node:crypto";
 import { Readable } from "node:stream";
 
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
 import type {
+  ChatCompletionResponse,
   AnthropicMessagesRequest,
   ChatCompletionRequest,
+  ChatCompletionUsage,
+  ChatToolCallDelta,
   ModelChainConfig,
   ResponseInput,
   ResponseInputItem,
@@ -15,7 +19,9 @@ import type {
 import type { AppConfig, GatewayModelConfig } from "../config.js";
 import type {
   CopilotProxyConnectionRegistry,
+  CopilotProxyRequestHandle,
   RegisteredCopilotProxyModel,
+  CopilotProxyStreamMessage,
 } from "../copilot-proxy/registry.js";
 import {
   buildChatCompletionRequestFromAnthropic,
@@ -352,6 +358,347 @@ function createAnthropicModelsList(
     object: "list",
     data: filterModelRecords([...staticModels, ...chainModels, ...copilotModels], status),
   };
+}
+
+function getAllowedCopilotPrefixes(options: ResponsesRoutesOptions): readonly string[] {
+  return options.allowedPrefixes ?? options.config.copilotProxy?.allowedPrefixes ?? ["copilot-"];
+}
+
+function isAllowedCopilotProxyModel(
+  modelName: string,
+  options: ResponsesRoutesOptions,
+): boolean {
+  return getAllowedCopilotPrefixes(options).some((prefix) => modelName.startsWith(prefix));
+}
+
+function getEffectiveRequestedModel(
+  config: AppConfig,
+  requestedModel?: string,
+): string | undefined {
+  const normalizedModel = normalizeOptionalString(requestedModel);
+  if (normalizedModel) {
+    return normalizedModel;
+  }
+
+  if (config.defaultModel) {
+    return config.defaultModel;
+  }
+
+  if (config.models.length === 1) {
+    return config.models[0]!.name;
+  }
+
+  return undefined;
+}
+
+function getCopilotProxyModelOrThrow(
+  options: ResponsesRoutesOptions,
+  requestedModel?: string,
+): RegisteredCopilotProxyModel | undefined {
+  const effectiveModel = getEffectiveRequestedModel(options.config, requestedModel);
+  if (!effectiveModel || !isAllowedCopilotProxyModel(effectiveModel, options)) {
+    return undefined;
+  }
+
+  const model = options.copilotProxyRegistry?.findModel(effectiveModel);
+  if (!model) {
+    throw new RouteError(
+      503,
+      "Copilot models unavailable — VS Code extension not connected.",
+    );
+  }
+
+  return model;
+}
+
+function normalizeCopilotMaxTokens(value: number | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  return Math.max(16, value);
+}
+
+function buildCopilotProxyRequest(
+  model: RegisteredCopilotProxyModel,
+  request: ChatCompletionRequest,
+): import("@llm-gateway/shared").CopilotProxyRequestMessage {
+  const proxyRequest: import("@llm-gateway/shared").CopilotProxyRequestMessage = {
+    type: "request",
+    id: randomUUID(),
+    model: model.id,
+    messages: request.messages.map((message) => ({
+      role: message.role,
+      content: message.content ?? "",
+      ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
+      ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
+    })),
+  };
+
+  const params: import("@llm-gateway/shared").CopilotProxyRequestParams = {};
+  if (request.stream !== undefined) {
+    params.stream = request.stream;
+  }
+  if (request.temperature !== undefined) {
+    params.temperature = request.temperature;
+  }
+  if (request.top_p !== undefined) {
+    params.top_p = request.top_p;
+  }
+  const maxTokens = normalizeCopilotMaxTokens(request.max_completion_tokens);
+  if (maxTokens !== undefined) {
+    params.max_tokens = maxTokens;
+  }
+  if (request.stop !== undefined) {
+    params.stop = request.stop;
+  }
+  if (request.user !== undefined) {
+    params.user = request.user;
+  }
+  if (request.metadata !== undefined) {
+    params.metadata = request.metadata;
+  }
+  if (request.tool_choice !== undefined) {
+    params.tool_choice = request.tool_choice;
+  }
+
+  if (Object.keys(params).length > 0) {
+    proxyRequest.params = params;
+  }
+
+  if (request.tools !== undefined && request.tools.length > 0) {
+    proxyRequest.tools = request.tools;
+  }
+
+  return proxyRequest;
+}
+
+function dispatchCopilotProxyRequest(
+  options: ResponsesRoutesOptions,
+  model: RegisteredCopilotProxyModel,
+  request: ChatCompletionRequest,
+): CopilotProxyRequestHandle {
+  const handle = options.copilotProxyRegistry?.dispatchRequest(
+    buildCopilotProxyRequest(model, request),
+  );
+
+  if (!handle) {
+    throw new RouteError(
+      503,
+      "Copilot models unavailable — VS Code extension not connected.",
+    );
+  }
+
+  return handle;
+}
+
+function translateCopilotUsage(
+  usage: import("@llm-gateway/shared").CopilotProxyUsage | undefined,
+): ChatCompletionUsage | undefined {
+  if (!usage) {
+    return undefined;
+  }
+
+  return {
+    prompt_tokens: usage.input_tokens,
+    completion_tokens: usage.output_tokens,
+    total_tokens: usage.total_tokens ?? usage.input_tokens + usage.output_tokens,
+  };
+}
+
+function getCopilotErrorStatus(message: CopilotProxyStreamMessage): number {
+  return message.type === "stream_error" && message.error.status
+    ? message.error.status
+    : 502;
+}
+
+async function collectCopilotCompletion(
+  handle: CopilotProxyRequestHandle,
+  modelId: string,
+): Promise<ChatCompletionResponse> {
+  let content = "";
+  let usage: ChatCompletionUsage | undefined;
+  const toolCallStates = new Map<number, ChatToolCallDelta>();
+
+  for await (const message of handle.events) {
+    if (message.type === "stream_delta") {
+      if (message.content_type === "text") {
+        content += message.content;
+      } else if (message.content_type === "tool_call") {
+        const existing = toolCallStates.get(message.content.index) ?? {
+          index: message.content.index,
+        };
+        if (message.content.id !== undefined) {
+          existing.id = message.content.id;
+        }
+        if (message.content.type !== undefined) {
+          existing.type = message.content.type;
+        }
+        if (message.content.function !== undefined) {
+          existing.function = {
+            name: `${existing.function?.name ?? ""}${message.content.function.name ?? ""}`,
+            arguments: `${existing.function?.arguments ?? ""}${message.content.function.arguments ?? ""}`,
+          };
+        }
+        toolCallStates.set(message.content.index, existing);
+      } else if (message.content_type === "usage") {
+        usage = translateCopilotUsage(message.content);
+      }
+      continue;
+    }
+
+    if (message.type === "stream_done") {
+      usage = translateCopilotUsage(message.usage) ?? usage;
+      const toolCalls = [...toolCallStates.values()]
+        .sort((left, right) => left.index - right.index)
+        .map((toolCall, index) => ({
+          id: toolCall.id ?? `call_${index}`,
+          type: "function" as const,
+          function: {
+            name: toolCall.function?.name ?? "tool",
+            arguments: toolCall.function?.arguments ?? "{}",
+          },
+        }));
+
+      return {
+        id: `chatcmpl_${randomUUID()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: modelId,
+        choices: [
+          {
+            index: 0,
+            finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
+            message: {
+              role: "assistant",
+              content: content.length > 0 ? content : null,
+              ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+            },
+          },
+        ],
+        ...(usage ? { usage } : {}),
+      };
+    }
+
+    throw new RouteError(getCopilotErrorStatus(message), message.error.message);
+  }
+
+  throw new RouteError(502, "Copilot proxy extension closed the request without a response.");
+}
+
+function createCopilotChatCompletionChunk(
+  modelId: string,
+  message: CopilotProxyStreamMessage,
+  streamId: string,
+  created: number,
+): ChatCompletionResponse {
+  const base = {
+    id: streamId,
+    object: "chat.completion.chunk",
+    created,
+    model: modelId,
+  };
+
+  if (message.type === "stream_done") {
+    const usage = translateCopilotUsage(message.usage);
+    return {
+      ...base,
+      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+      ...(usage ? { usage } : {}),
+    };
+  }
+
+  if (message.type === "stream_error") {
+    throw new RouteError(getCopilotErrorStatus(message), message.error.message);
+  }
+
+  if (message.content_type === "text") {
+    return {
+      ...base,
+      choices: [
+        {
+          index: 0,
+          delta: { content: message.content },
+          finish_reason: null,
+        },
+      ],
+    };
+  }
+
+  if (message.content_type === "tool_call") {
+    return {
+      ...base,
+      choices: [
+        {
+          index: 0,
+          delta: { tool_calls: [message.content] },
+          finish_reason: null,
+        },
+      ],
+    };
+  }
+
+  return {
+    ...base,
+    choices: [{ index: 0, delta: {}, finish_reason: null }],
+  };
+}
+
+async function* createCopilotChatCompletionStream(
+  handle: CopilotProxyRequestHandle,
+  modelId: string,
+): AsyncGenerator<string> {
+  const streamId = `chatcmpl_${randomUUID()}`;
+  const created = Math.floor(Date.now() / 1000);
+
+  for await (const message of handle.events) {
+    if (message.type === "stream_delta" && (message.content_type === "usage" || message.content_type === "progress")) {
+      continue;
+    }
+
+    const chunk = createCopilotChatCompletionChunk(modelId, message, streamId, created);
+    yield `data: ${JSON.stringify(chunk)}\n\n`;
+
+    if (message.type === "stream_done") {
+      yield "data: [DONE]\n\n";
+      return;
+    }
+  }
+
+  throw new RouteError(502, "Copilot proxy extension closed the request without a response.");
+}
+
+async function* translateCopilotResponseStream(
+  handle: CopilotProxyRequestHandle,
+  publicModel: string,
+  options: TranslationOptions,
+): AsyncGenerator<string> {
+  const translator = createChatCompletionStreamTranslator(options);
+  for await (const frame of createCopilotChatCompletionStream(handle, publicModel)) {
+    for (const event of translator.push(frame)) {
+      yield event;
+    }
+  }
+
+  for (const event of translator.flush()) {
+    yield event;
+  }
+}
+
+async function* translateCopilotAnthropicStream(
+  handle: CopilotProxyRequestHandle,
+  publicModel: string,
+): AsyncGenerator<string> {
+  const translator = createAnthropicMessageStreamTranslator({ model: publicModel });
+  for await (const frame of createCopilotChatCompletionStream(handle, publicModel)) {
+    for (const event of translator.push(frame)) {
+      yield event;
+    }
+  }
+
+  for (const event of translator.flush()) {
+    yield event;
+  }
 }
 
 function resolveModel(
@@ -944,6 +1291,48 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Handling /responses request.",
       );
+      const copilotModel = getCopilotProxyModelOrThrow(options, parsedRequest.model);
+      if (copilotModel) {
+        if (parsedRequest.stream && !copilotModel.capabilities.supports_streaming) {
+          throw new RouteError(
+            400,
+            `Model \`${copilotModel.id}\` does not support streaming.`,
+          );
+        }
+
+        if (responseRequestUsesTools(parsedRequest) && !copilotModel.capabilities.supports_tools) {
+          throw new RouteError(
+            400,
+            `Model \`${copilotModel.id}\` does not support tools.`,
+          );
+        }
+
+        const upstreamRequest = buildChatCompletionRequest({
+          ...parsedRequest,
+          model: copilotModel.native_id,
+        });
+        const handle = dispatchCopilotProxyRequest(options, copilotModel, upstreamRequest);
+        const translationOptions = buildTranslationOptions(parsedRequest, copilotModel.id);
+
+        if (parsedRequest.stream) {
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no");
+
+          return reply.send(
+            Readable.from(translateCopilotResponseStream(handle, copilotModel.id, translationOptions)),
+          );
+        }
+
+        const copilotResponse = await collectCopilotCompletion(handle, copilotModel.id);
+        return reply.code(200).send(
+          translateChatCompletionResponse(copilotResponse, translationOptions),
+        );
+      }
+
       const selectedModel = resolveModel(options.config, parsedRequest.model);
       const supportsStreaming = selectedModel.supportsStreaming;
       const supportsTools = selectedModel.supportsTools;
@@ -1061,6 +1450,57 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Handling /v1/messages request.",
       );
+      const copilotModel = getCopilotProxyModelOrThrow(options, parsedRequest.model);
+      if (copilotModel) {
+        if (parsedRequest.stream && !copilotModel.capabilities.supports_streaming) {
+          throw new RouteError(
+            400,
+            `Model \`${copilotModel.id}\` does not support streaming.`,
+          );
+        }
+
+        if (anthropicRequestUsesTools(parsedRequest) && !copilotModel.capabilities.supports_tools) {
+          throw new RouteError(
+            400,
+            `Model \`${copilotModel.id}\` does not support tools.`,
+          );
+        }
+
+        let upstreamRequest: ChatCompletionRequest;
+        try {
+          upstreamRequest = buildChatCompletionRequestFromAnthropic({
+            ...parsedRequest,
+            model: copilotModel.native_id,
+          });
+        } catch (error) {
+          throw new RouteError(
+            400,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+
+        const handle = dispatchCopilotProxyRequest(options, copilotModel, upstreamRequest);
+        if (parsedRequest.stream) {
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no");
+
+          return reply.send(
+            Readable.from(translateCopilotAnthropicStream(handle, copilotModel.id)),
+          );
+        }
+
+        const copilotResponse = await collectCopilotCompletion(handle, copilotModel.id);
+        return reply.code(200).send(
+          translateChatCompletionResponseToAnthropic(copilotResponse, {
+            model: copilotModel.id,
+          }),
+        );
+      }
+
       const selectedModel = resolveModel(options.config, parsedRequest.model);
       const supportsStreaming = selectedModel.supportsStreaming;
       const supportsTools = selectedModel.supportsTools;
@@ -1197,6 +1637,42 @@ export const responsesRoutes: FastifyPluginAsync<ResponsesRoutesOptions> = async
         },
         "Handling /v1/chat/completions request.",
       );
+
+      const copilotModel = getCopilotProxyModelOrThrow(options, parsedRequest.model);
+      if (copilotModel) {
+        if (parsedRequest.stream && !copilotModel.capabilities.supports_streaming) {
+          throw new RouteError(
+            400,
+            `Model \`${copilotModel.id}\` does not support streaming.`,
+          );
+        }
+
+        if (chatCompletionsRequestUsesTools(parsedRequest) && !copilotModel.capabilities.supports_tools) {
+          throw new RouteError(400, `Model \`${copilotModel.id}\` does not support tools.`);
+        }
+
+        const upstreamRequest: ChatCompletionRequest = {
+          ...parsedRequest,
+          model: copilotModel.native_id,
+        };
+        const handle = dispatchCopilotProxyRequest(options, copilotModel, upstreamRequest);
+
+        if (parsedRequest.stream) {
+          reply
+            .code(200)
+            .type("text/event-stream; charset=utf-8")
+            .header("cache-control", "no-cache, no-transform")
+            .header("connection", "keep-alive")
+            .header("x-accel-buffering", "no");
+
+          return reply.send(
+            Readable.from(createCopilotChatCompletionStream(handle, copilotModel.id)),
+          );
+        }
+
+        const copilotResponse = await collectCopilotCompletion(handle, copilotModel.id);
+        return reply.code(200).send(copilotResponse);
+      }
 
       const selectedModel = resolveModel(options.config, parsedRequest.model);
 
