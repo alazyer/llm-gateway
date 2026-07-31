@@ -105,6 +105,7 @@ function baseConfig(): AppConfig {
     maxRetries: 0,
     maxBodySizeKb: 1024,
     healthProbeEnabled: false,
+  workspace: { enabled: false },
     gatewayAuthToken: GATEWAY_AUTH_TOKEN,
     models: [
       {

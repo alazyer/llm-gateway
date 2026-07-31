@@ -74,6 +74,7 @@ function makeConfig(models: GatewayModelConfig[], chains: ModelChainConfig[] = [
     maxRetries: 0,
     maxBodySizeKb: 1024,
     healthProbeEnabled: false,
+  workspace: { enabled: false },
     models,
     modelChains: chains,
     ...overrides,

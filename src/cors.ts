@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest, FastifyReply } from "fastify";
 
-const ALLOWED_METHODS = "GET, POST, OPTIONS";
+const ALLOWED_METHODS = "GET, POST, PUT, DELETE, PATCH, OPTIONS";
 const ALLOWED_HEADERS = "Content-Type, Authorization, x-api-key, anthropic-version";
 const MAX_AGE = 86400;
 

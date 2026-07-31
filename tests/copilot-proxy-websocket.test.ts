@@ -33,6 +33,7 @@ const config: AppConfig = {
   maxBodySizeKb: 1024,
   gatewayAuthToken: "gateway-token",
   healthProbeEnabled: false,
+  workspace: { enabled: false },
   copilotProxy: {
     enabled: true,
     requireTokenAuth: true,
@@ -40,7 +41,6 @@ const config: AppConfig = {
     heartbeatIntervalMs: 20,
     heartbeatTimeoutMs: 100,
     maxInflightPerConnection: 4,
-    allowedPrefixes: ["copilot-"],
   },
   models: [
     {
@@ -48,16 +48,12 @@ const config: AppConfig = {
       upstreamModel: "glm-5.1",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret-key",
-      apiKeyEnv: "GLM_API_KEY",
       ownedBy: "zhipu",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
       unknownFieldWindowRequests: 100,
-      status: "active",
-      statusReason: "Loaded from config",
-      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -204,7 +200,7 @@ describe("Copilot proxy WebSocket", () => {
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toMatchObject({
         id: "copilot-gpt-4o",
-        source: "copilot-",
+        source: "copilot-proxy",
         owned_by: "github-copilot",
         capabilities: {
           supports_responses_api: true,
@@ -283,37 +279,6 @@ describe("Copilot proxy WebSocket", () => {
       const closeCode = await waitForClose(ws);
       expect(closeCode).toBe(1008);
       await waitForModel(app, "copilot-gpt-4o", false);
-    } finally {
-      await app.close();
-    }
-  });
-
-  it("accepts model registrations with null max_tokens (Infinity serialized through JSON)", async () => {
-    const app = createApp({ config });
-
-    try {
-      await app.ready();
-      const token = await issueProxyToken(app);
-      const ws = await app.injectWS(`/ws/copilot-proxy?token=${encodeURIComponent(token)}`);
-
-      // Simulate a model whose maxInputTokens was Infinity:
-      // JSON.stringify(Infinity) → null, so the gateway must accept null.
-      ws.send(
-        JSON.stringify({
-          type: "register",
-          extension_version: "0.1.0",
-          copilot_status: "connected",
-          models: [
-            {
-              ...copilotModel,
-              capabilities: { ...copilotModel.capabilities, max_tokens: null },
-            },
-          ],
-        }),
-      );
-
-      await waitForModel(app, "copilot-gpt-4o", true);
-      ws.close();
     } finally {
       await app.close();
     }

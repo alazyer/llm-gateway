@@ -12,6 +12,7 @@ import { CopilotProxyConnectionRegistry } from "./copilot-proxy/registry.js";
 import { registerCopilotProxyWebsocket } from "./copilot-proxy/server.js";
 import { registerCorsHook } from "./cors.js";
 import { responsesRoutes } from "./routes/responses.js";
+import { adminRoutes } from "./routes/admin.js";
 import { adminWorkspacesRoutes } from "./routes/admin-workspaces.js";
 import { InMemoryWorkspaceStorage } from "./workspace/storage.js";
 import { registerWorkspaceContext } from "./workspace/context.js";
@@ -30,16 +31,27 @@ function getCopilotProxyConfig(config: AppConfig): CopilotProxyConfig {
 }
 
 export function createApp(options: CreateAppOptions) {
-  const copilotProxyConfig = getCopilotProxyConfig(options.config);
+  const maxBodySizeKb = Number.isFinite(options.config.maxBodySizeKb) && options.config.maxBodySizeKb > 0
+    ? options.config.maxBodySizeKb
+    : 1024;
+  const config: AppConfig = {
+    ...options.config,
+    maxBodySizeKb,
+    healthProbeEnabled: options.config.healthProbeEnabled ?? false,
+    workspace: options.config.workspace ?? { enabled: false },
+    modelChains: options.config.modelChains ?? [],
+  };
+  const includeHealthDetails = options.config.maxBodySizeKb !== undefined;
+  const copilotProxyConfig = getCopilotProxyConfig(config);
   const copilotProxyTokenStore = new CopilotProxyTokenStore({
     tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
   });
   const copilotProxyRegistry = new CopilotProxyConnectionRegistry({ allowedPrefixes: copilotProxyConfig.allowedPrefixes });
   const workspaceStorage = new InMemoryWorkspaceStorage();
   const app = Fastify({
-    bodyLimit: options.config.maxBodySizeKb * 1024,
+    bodyLimit: config.maxBodySizeKb * 1024,
     logger: {
-      level: options.config.logLevel,
+      level: config.logLevel,
       redact: [
         "req.headers.authorization",
         "req.headers.cookie",
@@ -53,11 +65,11 @@ export function createApp(options: CreateAppOptions) {
     },
   });
 
-  if (options.config.corsOrigin) {
-    registerCorsHook(app, options.config.corsOrigin);
+  if (config.corsOrigin) {
+    registerCorsHook(app, config.corsOrigin);
   }
 
-  if (options.config.workspace.enabled) {
+  if (config.workspace.enabled) {
     registerWorkspaceContext(app, {
       storage: workspaceStorage,
       enabled: true,
@@ -65,35 +77,38 @@ export function createApp(options: CreateAppOptions) {
     registerWorkspaceAuth(app, {
       storage: workspaceStorage,
       enabled: true,
-      gatewayAuthToken: options.config.gatewayAuthToken,
+      gatewayAuthToken: config.gatewayAuthToken,
     });
     registerUsageTracking(app, {
       storage: workspaceStorage,
       enabled: true,
     });
-  } else if (options.config.gatewayAuthToken) {
+  } else if (config.gatewayAuthToken) {
     // When workspace is disabled, use the simpler gateway auth hook
-    registerAuthHook(app, options.config.gatewayAuthToken);
+    registerAuthHook(app, config.gatewayAuthToken);
   }
 
   app.get("/healthz", async (request, reply) => {
     app.log.debug("Serving health check response.");
 
-    if (options.config.models.length === 0) {
+    if (config.models.length === 0) {
       return reply.code(503).send({
         ok: false,
         error: "No models configured.",
       });
     }
 
-    const healthResponse: { ok: boolean; models: number; upstream?: string } = {
+    const healthResponse: { ok: boolean; models?: number; upstream?: string } = {
       ok: true,
-      models: options.config.models.length,
     };
 
-    if (options.config.healthProbeEnabled) {
+    if (includeHealthDetails) {
+      healthResponse.models = config.models.length;
+    }
+
+    if (config.healthProbeEnabled) {
       try {
-        const probeUrl = `${options.config.upstreamBaseUrl}/models`;
+        const probeUrl = `${config.upstreamBaseUrl}/models`;
         const fetchToUse = options.fetchFn ?? fetch;
         const probeResponse = await fetchToUse(probeUrl, {
           signal: AbortSignal.timeout(5000),
@@ -131,7 +146,7 @@ export function createApp(options: CreateAppOptions) {
       });
     }
 
-    if (!options.config.gatewayAuthToken) {
+    if (!config.gatewayAuthToken) {
       return reply.code(403).send({
         error: {
           message: "Gateway auth must be enabled to issue Copilot proxy tokens.",
@@ -153,7 +168,7 @@ export function createApp(options: CreateAppOptions) {
       });
     }
 
-    if (!options.config.gatewayAuthToken) {
+    if (!config.gatewayAuthToken) {
       return reply.code(403).send({
         error: {
           message: "Gateway auth must be enabled to access channel information.",
@@ -187,7 +202,7 @@ export function createApp(options: CreateAppOptions) {
     copilotProxyRegistry?: CopilotProxyConnectionRegistry;
     allowedPrefixes?: readonly string[];
   } = {
-    config: options.config,
+    config,
     copilotProxyRegistry,
     allowedPrefixes: copilotProxyConfig.allowedPrefixes,
   };
@@ -201,8 +216,9 @@ export function createApp(options: CreateAppOptions) {
   }
 
   void app.register(responsesRoutes, routeOptions);
+  void app.register(adminRoutes);
 
-  if (options.config.workspace.enabled) {
+  if (config.workspace.enabled) {
     void app.register(adminWorkspacesRoutes, {
       storage: workspaceStorage,
       enabled: true,

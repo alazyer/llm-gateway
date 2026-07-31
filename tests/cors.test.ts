@@ -13,6 +13,7 @@ const baseConfig: AppConfig = {
   maxRetries: 0,
   maxBodySizeKb: 1024,
   healthProbeEnabled: false,
+  workspace: { enabled: false },
   models: [
     {
       name: "glm-5.1",
@@ -71,7 +72,7 @@ describe("CORS support", () => {
 
         expect(response.statusCode).toBe(200);
         expect(response.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
-        expect(response.headers["access-control-allow-methods"]).toBe("GET, POST, OPTIONS");
+        expect(response.headers["access-control-allow-methods"]).toBe("GET, POST, PUT, DELETE, PATCH, OPTIONS");
         expect(response.headers["access-control-allow-headers"]).toContain("Content-Type");
         expect(response.headers["access-control-max-age"]).toBe("86400");
       } finally {
@@ -127,7 +128,7 @@ describe("CORS support", () => {
 
         expect(response.statusCode).toBe(204);
         expect(response.headers["access-control-allow-origin"]).toBe("http://localhost:5173");
-        expect(response.headers["access-control-allow-methods"]).toBe("GET, POST, OPTIONS");
+        expect(response.headers["access-control-allow-methods"]).toBe("GET, POST, PUT, DELETE, PATCH, OPTIONS");
       } finally {
         await app.close();
       }

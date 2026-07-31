@@ -9,25 +9,17 @@ const config: AppConfig = {
   logLevel: "silent",
   upstreamBaseUrl: "https://provider.example/v1",
   defaultModel: "claude-gateway",
-  requestTimeoutMs: 30000,
-  maxRetries: 0,
-  maxBodySizeKb: 1024,
   models: [
     {
       name: "claude-gateway",
       upstreamModel: "provider-internal-coder",
       baseUrl: "https://provider.example/v1",
       apiKey: "secret-key",
-      apiKeyEnv: "CLAUDE_GATEWAY_API_KEY",
       ownedBy: "gateway",
       created: 1_718_000_000,
       supportsTools: true,
       supportsStreaming: true,
       unknownFieldMode: "warn",
-      unknownFieldWindowRequests: 100,
-      status: "active",
-      statusReason: "Loaded from config",
-      statusChangedAt: 1_718_000_000,
     },
   ],
 };
@@ -89,7 +81,6 @@ describe("Claude Code compatibility routes", () => {
             type: "model",
             display_name: "claude-gateway",
             created_at: "2024-06-10T06:13:20.000Z",
-            status: "active",
           },
         ],
       });

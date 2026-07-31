@@ -1,11 +1,17 @@
 .DS_Store
-node_modules
-dist
+node_modules/
+dist/
 .env
+.env.*
 gateway.config.yaml
 gateway.yaml
-coverage
+coverage/
 *.log
 
+*.tsbuildinfo
 
-.worktreedata/*.db
+.worktree/
+data/*.db
+data/*.db-*
+packages/*/.nuxt/
+packages/*/node_modules/

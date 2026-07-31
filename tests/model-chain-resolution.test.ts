@@ -149,6 +149,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     maxRetries: 0,
     maxBodySizeKb: 1024,
     healthProbeEnabled: false,
+  workspace: { enabled: false },
     models: [makeModel(), makeModel({ name: "glm-5.1", upstreamModel: "glm-5.1" })],
     modelChains: [],
     ...overrides,

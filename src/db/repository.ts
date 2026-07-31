@@ -377,6 +377,221 @@ export function getChainsReferencingModel(modelName: string): string[] {
   return rows.map((r) => r.chain_name);
 }
 
+/**
+ * Update a model's configuration columns (everything except `name` which is the
+ * primary key). Only the keys present in `partial` are updated; other columns
+ * remain unchanged.  `updated_at` is always set to the current timestamp.
+ */
+export function updateModel(
+  name: string,
+  partial: Partial<Omit<ModelRow, "name">>,
+): void {
+  const db = getDatabase();
+
+  const allowedKeys: ReadonlyArray<keyof Omit<ModelRow, "name">> = [
+    "upstream_model",
+    "base_url",
+    "api_key_env",
+    "owned_by",
+    "created",
+    "supports_tools",
+    "supports_streaming",
+    "unknown_field_mode",
+    "unknown_field_window_requests",
+    "source",
+    "source_prefix",
+    "connection_id",
+    "status",
+    "status_reason",
+    "status_changed_at",
+    "capabilities_json",
+    "updated_at",
+  ];
+
+  const setClauses: string[] = [];
+  const values: SQLInputValue[] = [];
+
+  for (const key of allowedKeys) {
+    if (key in partial) {
+      setClauses.push(`${key} = ?`);
+      values.push(partial[key] as SQLInputValue);
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return; // Nothing to update.
+  }
+
+  // Always bump updated_at unless the caller explicitly set it.
+  if (!("updated_at" in partial)) {
+    setClauses.push("updated_at = ?");
+    values.push(nowSeconds());
+  }
+
+  values.push(name); // WHERE name = ?
+
+  db.prepare(`UPDATE models SET ${setClauses.join(", ")} WHERE name = ?`)
+    .run(...values);
+}
+
+/**
+ * Delete a model row by its primary key.
+ * CASCADE will remove any chain_models rows referencing this model.
+ * After deletion, the caller should recalculate affected chain statuses.
+ */
+export function deleteModel(name: string): void {
+  const db = getDatabase();
+  db.prepare("DELETE FROM models WHERE name = ?").run(name);
+}
+
+/**
+ * Return models filtered by status and/or source.
+ * Both parameters are optional; when omitted, no filter is applied for that
+ * dimension.
+ */
+export function getModelsFiltered(
+  filters: { status?: string; source?: string },
+): ModelRow[] {
+  const db = getDatabase();
+
+  const clauses: string[] = [];
+  const values: SQLInputValue[] = [];
+
+  if (filters.status) {
+    clauses.push("status = ?");
+    values.push(filters.status);
+  }
+  if (filters.source) {
+    clauses.push("source = ?");
+    values.push(filters.source);
+  }
+
+  const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+  return db
+    .prepare(`SELECT * FROM models ${where} ORDER BY name`)
+    .all(...values) as unknown as ModelRow[];
+}
+
+// ---------------------------------------------------------------------------
+// Chain CRUD additions
+// ---------------------------------------------------------------------------
+
+/**
+ * Update a chain's configuration columns (everything except `name`).
+ * Only the keys present in `partial` are updated; other columns remain
+ * unchanged.  `updated_at` is always set to the current timestamp.
+ */
+export function updateChain(
+  name: string,
+  partial: Partial<Omit<ModelChainRow, "name">>,
+): void {
+  const db = getDatabase();
+
+  const allowedKeys: ReadonlyArray<keyof Omit<ModelChainRow, "name">> = [
+    "timeout_ms",
+    "max_retries",
+    "chain_timeout_ms",
+    "status",
+    "status_reason",
+    "status_changed_at",
+    "updated_at",
+  ];
+
+  const setClauses: string[] = [];
+  const values: SQLInputValue[] = [];
+
+  for (const key of allowedKeys) {
+    if (key in partial) {
+      setClauses.push(`${key} = ?`);
+      values.push(partial[key] as SQLInputValue);
+    }
+  }
+
+  if (setClauses.length === 0) {
+    return;
+  }
+
+  if (!("updated_at" in partial)) {
+    setClauses.push("updated_at = ?");
+    values.push(nowSeconds());
+  }
+
+  values.push(name);
+
+  db.prepare(`UPDATE model_chains SET ${setClauses.join(", ")} WHERE name = ?`)
+    .run(...values);
+}
+
+/**
+ * Delete a chain and its associated chain_models rows (CASCADE).
+ */
+export function deleteChain(name: string): void {
+  const db = getDatabase();
+  db.prepare("DELETE FROM model_chains WHERE name = ?").run(name);
+}
+
+/**
+ * Replace the chain_models entries for a given chain.
+ * Deletes all existing entries and inserts the new set atomically.
+ */
+export function replaceChainModels(
+  chainName: string,
+  models: ChainModelRow[],
+): void {
+  const db = getDatabase();
+
+  db.prepare("DELETE FROM chain_models WHERE chain_name = ?").run(chainName);
+
+  const insertStmt = db.prepare(
+    `INSERT INTO chain_models (chain_name, position, model_name, timeout_ms, max_retries)
+     VALUES (?, ?, ?, ?, ?)`,
+  );
+
+  for (const m of models) {
+    insertStmt.run(
+      m.chain_name,
+      m.position,
+      m.model_name,
+      m.timeout_ms,
+      m.max_retries,
+    );
+  }
+}
+
+/**
+ * Return chains filtered by status and/or source of their constituent models.
+ * The `source` filter checks whether ANY model in the chain has that source.
+ */
+export function getChainsFiltered(
+  filters: { status?: string; source?: string },
+): ModelChainRow[] {
+  const db = getDatabase();
+
+  if (!filters.status && !filters.source) {
+    return getAllChains();
+  }
+
+  const clauses: string[] = [];
+  const values: SQLInputValue[] = [];
+
+  if (filters.status) {
+    clauses.push("mc.status = ?");
+    values.push(filters.status);
+  }
+
+  if (filters.source) {
+    clauses.push(
+      "mc.name IN (SELECT DISTINCT cm.chain_name FROM chain_models cm JOIN models m ON cm.model_name = m.name WHERE m.source = ?)",
+    );
+    values.push(filters.source);
+  }
+
+  const where = `WHERE ${clauses.join(" AND ")}`;
+  return db
+    .prepare(`SELECT mc.* FROM model_chains mc ${where} ORDER BY mc.name`)
+    .all(...values) as unknown as ModelChainRow[];
+}
+
 // ---------------------------------------------------------------------------
 // Task 2.3 — Gateway config repository
 // ---------------------------------------------------------------------------

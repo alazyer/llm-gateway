@@ -2,7 +2,7 @@
  * Admin API routes for gateway lifecycle management.
  *
  * All endpoints require gateway_auth_token authentication.
- * These routes provide read-only status views and model activate/deactivate
+ * These routes provide read/write status views and model/chain CRUD
  * operations that also trigger chain status recalculation.
  */
 
@@ -12,14 +12,25 @@ import {
   getAllModels,
   getModelByName,
   updateModelStatus,
+  updateModel,
+  deleteModel,
+  getModelsFiltered,
   getChainsReferencingModel,
   getAllChains,
   getChainByName,
   getChainModels,
   getGatewayConfig,
+  updateGatewayConfig,
+  insertModel,
+  insertChain,
+  updateChain,
+  deleteChain,
+  replaceChainModels,
   recalculateChainStatus,
+  getChainsFiltered,
 } from "../db/repository.js";
 import type { ModelRow, ModelChainRow, ChainModelRow, GatewayConfigRow } from "../db/types.js";
+import { getDatabase } from "../db/index.js";
 
 // ---------------------------------------------------------------------------
 // Response shape types
@@ -94,6 +105,79 @@ interface AdminDatabaseInfo {
   };
   model_count: number;
   chain_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// Request body schemas (lightweight — just typed, no zod for admin routes)
+// ---------------------------------------------------------------------------
+
+interface CreateModelBody {
+  name: string;
+  upstream_model: string;
+  base_url: string;
+  api_key_env: string;
+  owned_by?: string;
+  supports_tools?: boolean;
+  supports_streaming?: boolean;
+  unknown_field_mode?: "warn" | "enforce";
+  unknown_field_window_requests?: number;
+  source?: string;
+  source_prefix?: string | null;
+}
+
+interface UpdateModelBody {
+  upstream_model?: string;
+  base_url?: string;
+  api_key_env?: string;
+  owned_by?: string;
+  supports_tools?: boolean;
+  supports_streaming?: boolean;
+  unknown_field_mode?: "warn" | "enforce";
+  unknown_field_window_requests?: number;
+  source?: string;
+  source_prefix?: string | null;
+  status?: "active" | "inactive";
+  status_reason?: string;
+}
+
+interface CreateChainBody {
+  name: string;
+  timeout_ms?: number;
+  max_retries?: number;
+  chain_timeout_ms?: number | null;
+  models: Array<{
+    model_name: string;
+    timeout_ms?: number | null;
+    max_retries?: number | null;
+  }>;
+}
+
+interface UpdateChainBody {
+  timeout_ms?: number;
+  max_retries?: number;
+  chain_timeout_ms?: number | null;
+  models?: Array<{
+    model_name: string;
+    timeout_ms?: number | null;
+    max_retries?: number | null;
+  }>;
+}
+
+interface PatchGatewayConfigBody {
+  default_model?: string | null;
+  request_timeout_ms?: number;
+  max_retries?: number;
+  max_body_size_kb?: number;
+  gateway_auth_token_env?: string | null;
+  health_probe_enabled?: boolean;
+  cors_origin?: string | string[] | null;
+  copilot_proxy_enabled?: boolean;
+  copilot_proxy_require_token_auth?: boolean;
+  copilot_proxy_token_ttl_seconds?: number;
+  copilot_proxy_heartbeat_interval_ms?: number;
+  copilot_proxy_heartbeat_timeout_ms?: number;
+  copilot_proxy_max_inflight_per_connection?: number;
+  copilot_proxy_allowed_prefixes?: string[];
 }
 
 // ---------------------------------------------------------------------------
@@ -181,14 +265,54 @@ function recalculateAffectedChains(modelName: string): void {
   }
 }
 
+/**
+ * Parse query filters from the request query string.
+ */
+function parseListFilters(query: Record<string, string | undefined>): {
+  status?: string;
+  source?: string;
+} {
+  const filters: { status?: string; source?: string } = {};
+  if (query.status) {
+    filters.status = query.status;
+  }
+  if (query.source) {
+    filters.source = query.source;
+  }
+  return filters;
+}
+
+/** Convert a boolean to its SQLite integer representation. */
+function boolToInt(value: boolean): number {
+  return value ? 1 : 0;
+}
+
+/** Serialise a string or string array for the `cors_origin` column. */
+function serialiseCorsOrigin(origin: string | string[] | null | undefined): string | null {
+  if (origin === undefined || origin === null) return null;
+  if (Array.isArray(origin)) return JSON.stringify(origin);
+  return origin;
+}
+
+/** Serialise the copilot-proxy allowed prefixes as a JSON string. */
+function serialisePrefixes(prefixes: string[]): string {
+  return JSON.stringify(prefixes);
+}
+
 // ---------------------------------------------------------------------------
 // Route plugin
 // ---------------------------------------------------------------------------
 
 export const adminRoutes: FastifyPluginAsync = async (app) => {
-  // GET /admin/models — list all models with status
-  app.get("/admin/models", async (_request, reply) => {
-    const models = getAllModels();
+  // =======================================================================
+  // Models
+  // =======================================================================
+
+  // GET /admin/models — list models with optional ?status=&source= filters
+  app.get("/admin/models", async (request, reply) => {
+    const query = request.query as Record<string, string | undefined>;
+    const filters = parseListFilters(query);
+    const models = getModelsFiltered(filters);
     const summaries = models.map(modelRowToSummary);
     return reply.send({ models: summaries });
   });
@@ -208,6 +332,140 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     return reply.send({ model: modelRowToDetail(model) });
+  });
+
+  // POST /admin/models — create a new model
+  app.post("/admin/models", async (request, reply) => {
+    const body = request.body as CreateModelBody;
+
+    if (!body.name || !body.upstream_model || !body.base_url || !body.api_key_env) {
+      return reply.code(400).send({
+        error: {
+          message: "Missing required fields: name, upstream_model, base_url, api_key_env.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    const existing = getModelByName(body.name);
+    if (existing) {
+      return reply.code(409).send({
+        error: {
+          message: `Model '${body.name}' already exists.`,
+          type: "conflict_error",
+        },
+      });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const row: ModelRow = {
+      name: body.name,
+      upstream_model: body.upstream_model,
+      base_url: body.base_url,
+      api_key_env: body.api_key_env,
+      owned_by: body.owned_by ?? "llm-gateway",
+      created: now,
+      supports_tools: boolToInt(body.supports_tools ?? true),
+      supports_streaming: boolToInt(body.supports_streaming ?? true),
+      unknown_field_mode: body.unknown_field_mode ?? "warn",
+      unknown_field_window_requests: body.unknown_field_window_requests ?? 100,
+      source: body.source ?? "static",
+      source_prefix: body.source_prefix ?? null,
+      connection_id: null,
+      status: "active",
+      status_reason: "Created via admin API",
+      status_changed_at: now,
+      capabilities_json: null,
+      updated_at: now,
+    };
+
+    insertModel(row);
+
+    const created = getModelByName(body.name)!;
+    return reply.code(201).send({ model: modelRowToDetail(created) });
+  });
+
+  // PUT /admin/models/:name — update model config
+  app.put("/admin/models/:name", async (request, reply) => {
+    const { name } = request.params as { name: string };
+    const body = request.body as UpdateModelBody;
+
+    const existing = getModelByName(name);
+    if (!existing) {
+      return reply.code(404).send({
+        error: {
+          message: `Model '${name}' not found.`,
+          type: "not_found_error",
+        },
+      });
+    }
+
+    const partial: Partial<Omit<ModelRow, "name">> = {};
+
+    if (body.upstream_model !== undefined) partial.upstream_model = body.upstream_model;
+    if (body.base_url !== undefined) partial.base_url = body.base_url;
+    if (body.api_key_env !== undefined) partial.api_key_env = body.api_key_env;
+    if (body.owned_by !== undefined) partial.owned_by = body.owned_by;
+    if (body.supports_tools !== undefined) partial.supports_tools = boolToInt(body.supports_tools);
+    if (body.supports_streaming !== undefined) partial.supports_streaming = boolToInt(body.supports_streaming);
+    if (body.unknown_field_mode !== undefined) partial.unknown_field_mode = body.unknown_field_mode;
+    if (body.unknown_field_window_requests !== undefined) partial.unknown_field_window_requests = body.unknown_field_window_requests;
+    if (body.source !== undefined) partial.source = body.source;
+    if (body.source_prefix !== undefined) partial.source_prefix = body.source_prefix ?? null;
+
+    // Status changes via PUT also trigger chain recalculation.
+    let statusChanged = false;
+    if (body.status !== undefined && body.status !== existing.status) {
+      partial.status = body.status;
+      partial.status_reason = body.status_reason ?? `${body.status === "active" ? "Activated" : "Deactivated"} via admin API`;
+      partial.status_changed_at = Math.floor(Date.now() / 1000);
+      statusChanged = true;
+    } else if (body.status_reason !== undefined) {
+      partial.status_reason = body.status_reason;
+    }
+
+    updateModel(name, partial);
+
+    if (statusChanged) {
+      recalculateAffectedChains(name);
+    }
+
+    const updated = getModelByName(name)!;
+    return reply.send({ model: modelRowToDetail(updated) });
+  });
+
+  // DELETE /admin/models/:name — delete model
+  app.delete("/admin/models/:name", async (request, reply) => {
+    const { name } = request.params as { name: string };
+
+    const existing = getModelByName(name);
+    if (!existing) {
+      return reply.code(404).send({
+        error: {
+          message: `Model '${name}' not found.`,
+          type: "not_found_error",
+        },
+      });
+    }
+
+    // Find affected chains before deleting (CASCADE removes chain_models refs).
+    const affectedChains = getChainsReferencingModel(name);
+
+    deleteModel(name);
+
+    // Recalculate affected chain statuses (some may now be inactive/empty).
+    for (const chainName of affectedChains) {
+      const chain = getChainByName(chainName);
+      if (chain) {
+        recalculateChainStatus(chainName);
+      }
+      // If the chain no longer exists (shouldn't happen, but defensive), skip.
+    }
+
+    return reply.code(200).send({
+      message: `Model '${name}' deleted successfully.`,
+      affected_chains: affectedChains,
+    });
   });
 
   // POST /admin/models/:name/activate — activate model
@@ -272,9 +530,15 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     });
   });
 
-  // GET /admin/chains — list all chains with status
-  app.get("/admin/chains", async (_request, reply) => {
-    const chains = getAllChains();
+  // =======================================================================
+  // Chains
+  // =======================================================================
+
+  // GET /admin/chains — list chains with optional ?status=&source= filters
+  app.get("/admin/chains", async (request, reply) => {
+    const query = request.query as Record<string, string | undefined>;
+    const filters = parseListFilters(query);
+    const chains = getChainsFiltered(filters);
     const summaries = chains.map((chain) => {
       const chainModels = getChainModels(chain.name);
       const activeCount = chainModels.filter((cm) => {
@@ -311,6 +575,207 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     return reply.send({ chain: chainRowToDetail(chain, chainModels, modelStatusByName) });
   });
+
+  // POST /admin/chains — create a new chain
+  app.post("/admin/chains", async (request, reply) => {
+    const body = request.body as CreateChainBody;
+
+    if (!body.name) {
+      return reply.code(400).send({
+        error: {
+          message: "Missing required field: name.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    if (!body.models || body.models.length === 0) {
+      return reply.code(400).send({
+        error: {
+          message: "Chains must have at least one model.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    // Validate that all referenced models exist
+    for (const m of body.models) {
+      const model = getModelByName(m.model_name);
+      if (!model) {
+        return reply.code(400).send({
+          error: {
+            message: `Model '${m.model_name}' not found. Cannot add non-existent model to chain.`,
+            type: "invalid_request_error",
+          },
+        });
+      }
+    }
+
+    const existing = getChainByName(body.name);
+    if (existing) {
+      return reply.code(409).send({
+        error: {
+          message: `Chain '${body.name}' already exists.`,
+          type: "conflict_error",
+        },
+      });
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const chainRow: ModelChainRow = {
+      name: body.name,
+      timeout_ms: body.timeout_ms ?? 30000,
+      max_retries: body.max_retries ?? 0,
+      chain_timeout_ms: body.chain_timeout_ms ?? null,
+      status: "active",
+      status_reason: "Created via admin API",
+      status_changed_at: now,
+      updated_at: now,
+    };
+
+    const chainModelRows: ChainModelRow[] = body.models.map((m, index) => ({
+      chain_name: body.name,
+      position: index,
+      model_name: m.model_name,
+      timeout_ms: m.timeout_ms ?? null,
+      max_retries: m.max_retries ?? null,
+    }));
+
+    const db = getDatabase();
+    db.exec("BEGIN TRANSACTION");
+    try {
+      insertChain(chainRow, chainModelRows);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    // Recalculate the chain status based on model statuses
+    recalculateChainStatus(body.name);
+
+    const created = getChainByName(body.name)!;
+    const createdModels = getChainModels(body.name);
+    const modelStatusByName = new Map<string, string>();
+    for (const cm of createdModels) {
+      const model = getModelByName(cm.model_name);
+      if (model) {
+        modelStatusByName.set(cm.model_name, model.status);
+      }
+    }
+
+    return reply.code(201).send({ chain: chainRowToDetail(created, createdModels, modelStatusByName) });
+  });
+
+  // PUT /admin/chains/:name — update chain config and/or model membership
+  app.put("/admin/chains/:name", async (request, reply) => {
+    const { name } = request.params as { name: string };
+    const body = request.body as UpdateChainBody;
+
+    const existing = getChainByName(name);
+    if (!existing) {
+      return reply.code(404).send({
+        error: {
+          message: `Chain '${name}' not found.`,
+          type: "not_found_error",
+        },
+      });
+    }
+
+    // Validate model references if models are being updated
+    if (body.models) {
+      if (body.models.length === 0) {
+        return reply.code(400).send({
+          error: {
+            message: "Chains must have at least one model.",
+            type: "invalid_request_error",
+          },
+        });
+      }
+      for (const m of body.models) {
+        const model = getModelByName(m.model_name);
+        if (!model) {
+          return reply.code(400).send({
+            error: {
+              message: `Model '${m.model_name}' not found. Cannot add non-existent model to chain.`,
+              type: "invalid_request_error",
+            },
+          });
+        }
+      }
+    }
+
+    const db = getDatabase();
+    db.exec("BEGIN TRANSACTION");
+    try {
+      // Update chain-level fields
+      const partial: Partial<Omit<ModelChainRow, "name">> = {};
+      if (body.timeout_ms !== undefined) partial.timeout_ms = body.timeout_ms;
+      if (body.max_retries !== undefined) partial.max_retries = body.max_retries;
+      if (body.chain_timeout_ms !== undefined) partial.chain_timeout_ms = body.chain_timeout_ms;
+
+      if (Object.keys(partial).length > 0) {
+        updateChain(name, partial);
+      }
+
+      // Replace model membership if provided
+      if (body.models) {
+        const chainModelRows: ChainModelRow[] = body.models.map((m, index) => ({
+          chain_name: name,
+          position: index,
+          model_name: m.model_name,
+          timeout_ms: m.timeout_ms ?? null,
+          max_retries: m.max_retries ?? null,
+        }));
+        replaceChainModels(name, chainModelRows);
+      }
+
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+
+    // Recalculate chain status after membership/config change
+    recalculateChainStatus(name);
+
+    const updated = getChainByName(name)!;
+    const updatedModels = getChainModels(name);
+    const modelStatusByName = new Map<string, string>();
+    for (const cm of updatedModels) {
+      const model = getModelByName(cm.model_name);
+      if (model) {
+        modelStatusByName.set(cm.model_name, model.status);
+      }
+    }
+
+    return reply.send({ chain: chainRowToDetail(updated, updatedModels, modelStatusByName) });
+  });
+
+  // DELETE /admin/chains/:name — delete chain
+  app.delete("/admin/chains/:name", async (request, reply) => {
+    const { name } = request.params as { name: string };
+
+    const existing = getChainByName(name);
+    if (!existing) {
+      return reply.code(404).send({
+        error: {
+          message: `Chain '${name}' not found.`,
+          type: "not_found_error",
+        },
+      });
+    }
+
+    deleteChain(name);
+
+    return reply.code(200).send({
+      message: `Chain '${name}' deleted successfully.`,
+    });
+  });
+
+  // =======================================================================
+  // Gateway status & config
+  // =======================================================================
 
   // GET /admin/status — gateway status summary
   app.get("/admin/status", async (_request, reply) => {
@@ -377,6 +842,96 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       },
       model_count: models.length,
       chain_count: chains.length,
+    };
+
+    return reply.send(info);
+  });
+
+  // PATCH /admin/database — partial-update gateway config singleton
+  app.patch("/admin/database", async (request, reply) => {
+    const body = request.body as PatchGatewayConfigBody;
+
+    const existing = getGatewayConfig();
+    if (!existing) {
+      return reply.code(503).send({
+        error: {
+          message: "Gateway configuration not found in database.",
+          type: "service_unavailable_error",
+        },
+      });
+    }
+
+    const partial: Partial<Omit<GatewayConfigRow, "id">> = {};
+
+    if (body.default_model !== undefined) {
+      partial.default_model = body.default_model ?? null;
+    }
+    if (body.request_timeout_ms !== undefined) {
+      partial.request_timeout_ms = body.request_timeout_ms;
+    }
+    if (body.max_retries !== undefined) {
+      partial.max_retries = body.max_retries;
+    }
+    if (body.max_body_size_kb !== undefined) {
+      partial.max_body_size_kb = body.max_body_size_kb;
+    }
+    if (body.gateway_auth_token_env !== undefined) {
+      partial.gateway_auth_token_env = body.gateway_auth_token_env ?? null;
+    }
+    if (body.health_probe_enabled !== undefined) {
+      partial.health_probe_enabled = boolToInt(body.health_probe_enabled);
+    }
+    if (body.cors_origin !== undefined) {
+      partial.cors_origin = serialiseCorsOrigin(body.cors_origin);
+    }
+    if (body.copilot_proxy_enabled !== undefined) {
+      partial.copilot_proxy_enabled = boolToInt(body.copilot_proxy_enabled);
+    }
+    if (body.copilot_proxy_require_token_auth !== undefined) {
+      partial.copilot_proxy_require_token_auth = boolToInt(body.copilot_proxy_require_token_auth);
+    }
+    if (body.copilot_proxy_token_ttl_seconds !== undefined) {
+      partial.copilot_proxy_token_ttl_seconds = body.copilot_proxy_token_ttl_seconds;
+    }
+    if (body.copilot_proxy_heartbeat_interval_ms !== undefined) {
+      partial.copilot_proxy_heartbeat_interval_ms = body.copilot_proxy_heartbeat_interval_ms;
+    }
+    if (body.copilot_proxy_heartbeat_timeout_ms !== undefined) {
+      partial.copilot_proxy_heartbeat_timeout_ms = body.copilot_proxy_heartbeat_timeout_ms;
+    }
+    if (body.copilot_proxy_max_inflight_per_connection !== undefined) {
+      partial.copilot_proxy_max_inflight_per_connection = body.copilot_proxy_max_inflight_per_connection;
+    }
+    if (body.copilot_proxy_allowed_prefixes !== undefined) {
+      partial.copilot_proxy_allowed_prefixes = serialisePrefixes(body.copilot_proxy_allowed_prefixes);
+    }
+
+    if (Object.keys(partial).length === 0) {
+      return reply.code(400).send({
+        error: {
+          message: "No fields provided to update.",
+          type: "invalid_request_error",
+        },
+      });
+    }
+
+    updateGatewayConfig(partial);
+
+    const updated = getGatewayConfig()!;
+    const info: AdminDatabaseInfo = {
+      type: "sqlite",
+      gateway_config: {
+        id: updated.id,
+        default_model: updated.default_model,
+        request_timeout_ms: updated.request_timeout_ms,
+        max_retries: updated.max_retries,
+        max_body_size_kb: updated.max_body_size_kb,
+        health_probe_enabled: updated.health_probe_enabled === 1,
+        cors_origin: updated.cors_origin,
+        copilot_proxy_enabled: updated.copilot_proxy_enabled === 1,
+      },
+      model_count: getAllModels().length,
+      chain_count: getAllChains().length,
     };
 
     return reply.send(info);
