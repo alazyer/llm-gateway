@@ -104,6 +104,7 @@ function startProxy(logger: ExtensionLogger, statusBar: StatusBarController): vo
   if (!isExtensionConfigComplete(config)) {
     const missing = [
       config.gatewayUrl ? undefined : "gatewayUrl",
+      config.modelPrefix ? undefined : "modelPrefix",
       !config.enableGatewayAuth || config.proxyToken ? undefined : "proxyToken",
     ].filter((value): value is string => value !== undefined);
     statusBar.setStatus("disconnected");
