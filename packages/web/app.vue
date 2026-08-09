@@ -56,17 +56,19 @@
 
 <script setup lang="ts">
 const route = useRoute();
+const runtimeConfig = useRuntimeConfig();
 const api = useGatewayApi();
 
 const isAuthPage = computed(() => route.path === "/auth");
+const isWebChatEnabled = computed(() => runtimeConfig.public.webChatValidationEnabled !== false);
 
-const navItems = [
+const navItems = computed(() => [
   { label: "Status", to: "/", icon: "i-lucide-activity" },
-  { label: "Chat", to: "/chat", icon: "i-lucide-messages-square" },
+  ...(isWebChatEnabled.value ? [{ label: "Chat", to: "/chat", icon: "i-lucide-messages-square" }] : []),
   { label: "Models", to: "/models", icon: "i-lucide-boxes" },
   { label: "Chains", to: "/chains", icon: "i-lucide-route" },
   { label: "Settings", to: "/settings", icon: "i-lucide-sliders-horizontal" },
-];
+]);
 
 function isActive(path: string): boolean {
   return path === "/" ? route.path === "/" : route.path.startsWith(path);

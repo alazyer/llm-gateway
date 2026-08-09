@@ -21,6 +21,7 @@ export default defineNuxtConfig({
     public: {
       // Gateway API base URL - the backend Fastify server
       gatewayBaseUrl: process.env.GATEWAY_BASE_URL || "http://localhost:3000",
+      webChatValidationEnabled: process.env.WEB_CHAT_VALIDATION_ENABLED !== "false",
     },
   },
 

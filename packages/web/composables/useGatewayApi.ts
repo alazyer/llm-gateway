@@ -1,10 +1,16 @@
 /**
  * Authenticated fetch wrapper for the LLM Gateway admin API.
  *
- * - Reads the auth token from localStorage
+ * - Reads the auth token from in-memory browser state
  * - Sets Authorization: Bearer <token> on every request
  * - Throws on non-2xx responses with a structured error
  */
+
+import {
+  clearGatewayAuthToken,
+  getGatewayAuthToken,
+  setGatewayAuthToken,
+} from "../utils/authToken";
 
 const DEFAULT_CHAT_VALIDATION_TIMEOUT_MS = 120_000;
 
@@ -97,22 +103,15 @@ export function useGatewayApi() {
   const baseUrl = config.public.gatewayBaseUrl as string;
 
   function getToken(): string | null {
-    if (import.meta.client) {
-      return localStorage.getItem("gateway_auth_token");
-    }
-    return null;
+    return getGatewayAuthToken();
   }
 
   function setToken(token: string): void {
-    if (import.meta.client) {
-      localStorage.setItem("gateway_auth_token", token);
-    }
+    setGatewayAuthToken(token);
   }
 
   function clearToken(): void {
-    if (import.meta.client) {
-      localStorage.removeItem("gateway_auth_token");
-    }
+    clearGatewayAuthToken();
   }
 
   function getAuthHeaders(): Record<string, string> {

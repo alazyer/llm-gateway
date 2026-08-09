@@ -66,7 +66,7 @@
         </UForm>
 
         <p class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-          Token is stored locally in this browser and sent as a bearer token.
+          Token stays in memory for this browser session and is sent as a bearer token.
         </p>
       </UCard>
     </div>
@@ -74,6 +74,8 @@
 </template>
 
 <script setup lang="ts">
+import { clearGatewayAuthToken, getGatewayAuthToken, setGatewayAuthToken } from "~/utils/authToken";
+
 const highlights = [
   { label: "Health", copy: "Live status at a glance", icon: "i-lucide-activity" },
   { label: "Models", copy: "Activate and retire safely", icon: "i-lucide-boxes" },
@@ -95,12 +97,13 @@ async function onSubmit() {
   error.value = "";
 
   try {
-    api.setToken(state.token.trim());
+    const token = state.token.trim();
+    setGatewayAuthToken(token);
     // Verify token by calling a lightweight endpoint
     await api.getStatus();
     navigateTo("/");
   } catch (e: unknown) {
-    api.clearToken();
+    clearGatewayAuthToken();
     error.value =
       e instanceof Error ? e.message : "Authentication failed. Check your token.";
   } finally {
@@ -110,7 +113,7 @@ async function onSubmit() {
 
 // If already authenticated, skip auth page
 onMounted(() => {
-  if (api.getToken()) {
+  if (getGatewayAuthToken()) {
     navigateTo("/");
   }
 });

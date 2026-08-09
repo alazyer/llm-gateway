@@ -1,11 +1,10 @@
 /**
- * Auth middleware — redirects to /auth if no token is stored.
+ * Auth middleware — redirects to /auth if no token is present in memory.
  */
+import { getGatewayAuthToken } from "~/utils/authToken";
+
 export default defineNuxtRouteMiddleware((to) => {
-  if (import.meta.client) {
-    const token = localStorage.getItem("gateway_auth_token");
-    if (!token && to.path !== "/auth") {
-      return navigateTo("/auth");
-    }
+  if (!getGatewayAuthToken() && to.path !== "/auth") {
+    return navigateTo("/auth");
   }
 });

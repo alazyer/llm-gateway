@@ -186,7 +186,7 @@
 import type { ChatValidationResponse } from "~/composables/useGatewayApi";
 import { classifyGatewayError } from "~/utils/chatErrorClassification";
 
-definePageMeta({ middleware: "auth" });
+definePageMeta({ middleware: ["auth", "web-chat-validation"] });
 
 type SessionModelStatus = "untested" | "available" | "unavailable";
 
