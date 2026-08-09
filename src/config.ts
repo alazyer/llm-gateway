@@ -83,8 +83,8 @@ const yamlGatewaySchema = z.object({
   copilot_proxy_heartbeat_timeout_ms: z.coerce.number().int().positive().default(10000),
   copilot_proxy_max_inflight_per_connection: z.coerce.number().int().positive().default(4),
   copilot_proxy_allowed_prefixes: z.array(z.string().trim().min(1)).default(["copilot-"]),
-  models: z.array(yamlModelSchema).min(1),
-  model_chains: z.array(yamlModelChainSchema).default([]),
+  models: z.array(yamlModelSchema).min(1).optional(),
+  model_chains: z.array(yamlModelChainSchema).optional(),
 });
 
 export interface GatewayModelConfig {
@@ -135,6 +135,11 @@ export interface CopilotProxyConfig {
   heartbeatTimeoutMs: number;
   maxInflightPerConnection: number;
   allowedPrefixes: string[];
+}
+
+export interface ConfigSourcePresence {
+  missingModels: boolean;
+  missingModelChains: boolean;
 }
 
 export const DEFAULT_COPILOT_PROXY_CONFIG: CopilotProxyConfig = {
@@ -293,7 +298,7 @@ function normalizeModelChains(
 function loadYamlConfig(
   configPath: string,
   env: NodeJS.ProcessEnv,
-): { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; workspace: WorkspaceConfig; copilotProxy: CopilotProxyConfig } {
+): { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl?: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; workspace: WorkspaceConfig; copilotProxy: CopilotProxyConfig; sourcePresence: ConfigSourcePresence } {
   let rawContent: string;
   try {
     rawContent = readFileSync(resolve(configPath), "utf8");
@@ -316,31 +321,36 @@ function loadYamlConfig(
     );
   }
 
-  const parsed = yamlGatewaySchema.parse(parsedYaml);
-  const models = parsed.models.map((model) => normalizeModelEntry(model, env));
-  const modelChains = normalizeModelChains(
-    parsed.model_chains,
-    models,
-    parsed.request_timeout_ms,
-    parsed.max_retries,
-    parsed.copilot_proxy_allowed_prefixes,
-  );
-  const defaultModel = parsed.default_model;
+  const parsedRaw = (parsedYaml ?? {}) as Record<string, unknown>;
+  const sourcePresence: ConfigSourcePresence = {
+    missingModels: !Object.prototype.hasOwnProperty.call(parsedRaw, "models"),
+    missingModelChains: !Object.prototype.hasOwnProperty.call(parsedRaw, "model_chains"),
+  };
 
-  if (
-    defaultModel &&
-    !models.some((model) => model.name === defaultModel) &&
-    !modelChains.some((chain) => `chain-${chain.name}` === defaultModel)
-  ) {
-    throw new Error(
-      `default_model ${defaultModel} is not present in the configured model catalog or model chains.`,
-    );
+  const parsed = yamlGatewaySchema.parse(parsedYaml);
+  const models = (parsed.models ?? []).map((model) => normalizeModelEntry(model, env));
+
+  // If models are missing from YAML, defer chain loading to runtime DB fallback.
+  // Chain normalization needs a model catalog and would fail eagerly here.
+  const shouldDeferChainsToRuntime = sourcePresence.missingModels;
+  if (shouldDeferChainsToRuntime) {
+    sourcePresence.missingModelChains = true;
   }
 
-  const config: { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; workspace: WorkspaceConfig; copilotProxy: CopilotProxyConfig } = {
+  const modelChains = shouldDeferChainsToRuntime
+    ? []
+    : normalizeModelChains(
+        parsed.model_chains ?? [],
+        models,
+        parsed.request_timeout_ms,
+        parsed.max_retries,
+        parsed.copilot_proxy_allowed_prefixes,
+      );
+  const defaultModel = parsed.default_model;
+
+  const config: { models: GatewayModelConfig[]; modelChains: ModelChainConfig[]; upstreamBaseUrl?: string; defaultModel?: string; requestTimeoutMs: number; maxRetries: number; maxBodySizeKb: number; gatewayAuthToken?: string; gatewayAuthTokenEnv?: string; healthProbeEnabled: boolean; corsOrigin?: string | string[]; workspace: WorkspaceConfig; copilotProxy: CopilotProxyConfig; sourcePresence: ConfigSourcePresence } = {
     models,
     modelChains,
-    upstreamBaseUrl: models[0]!.baseUrl,
     requestTimeoutMs: parsed.request_timeout_ms,
     maxRetries: parsed.max_retries,
     maxBodySizeKb: parsed.max_body_size_kb,
@@ -357,7 +367,12 @@ function loadYamlConfig(
       maxInflightPerConnection: parsed.copilot_proxy_max_inflight_per_connection,
       allowedPrefixes: parsed.copilot_proxy_allowed_prefixes,
     },
+    sourcePresence,
   };
+
+  if (models.length > 0) {
+    config.upstreamBaseUrl = models[0]!.baseUrl;
+  }
 
   if (parsed.gateway_auth_token_env) {
     config.gatewayAuthTokenEnv = parsed.gateway_auth_token_env;
@@ -378,7 +393,14 @@ function loadYamlConfig(
   return config;
 }
 
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+export interface RuntimeConfigLoadResult {
+  config: AppConfig;
+  sourcePresence: ConfigSourcePresence;
+}
+
+export function loadConfigForRuntime(
+  env: NodeJS.ProcessEnv = process.env,
+): RuntimeConfigLoadResult {
   const parsed = envSchema.parse(env);
   const configSource = loadYamlConfig(parsed.GATEWAY_CONFIG_PATH, env);
 
@@ -386,7 +408,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     host: parsed.HOST,
     port: parsed.PORT,
     logLevel: parsed.LOG_LEVEL,
-    upstreamBaseUrl: configSource.upstreamBaseUrl,
+    upstreamBaseUrl: configSource.upstreamBaseUrl ?? "",
     requestTimeoutMs: configSource.requestTimeoutMs,
     maxRetries: configSource.maxRetries,
     maxBodySizeKb: configSource.maxBodySizeKb,
@@ -412,6 +434,46 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   if (configSource.corsOrigin) {
     config.corsOrigin = configSource.corsOrigin;
   }
+
+  return {
+    config,
+    sourcePresence: configSource.sourcePresence,
+  };
+}
+
+function validateDefaultModel(config: AppConfig): void {
+  if (!config.defaultModel) {
+    return;
+  }
+
+  const modelExists = config.models.some((model) => model.name === config.defaultModel);
+  const chainExists = config.modelChains.some((chain) => `chain-${chain.name}` === config.defaultModel);
+
+  if (!modelExists && !chainExists) {
+    throw new Error(
+      `default_model ${config.defaultModel} is not present in the configured model catalog or model chains.`,
+    );
+  }
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const { config, sourcePresence } = loadConfigForRuntime(env);
+
+  if (sourcePresence.missingModels) {
+    throw new Error(
+      "Gateway config is missing required `models` section. Startup fallback to database is only available in the server bootstrap path.",
+    );
+  }
+
+  if (config.models.length === 0) {
+    throw new Error("Gateway config must include at least one model.");
+  }
+
+  if (!config.upstreamBaseUrl) {
+    throw new Error("Gateway config must include a valid model base_url.");
+  }
+
+  validateDefaultModel(config);
 
   return config;
 }

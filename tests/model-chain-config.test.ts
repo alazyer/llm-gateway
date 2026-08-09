@@ -4,8 +4,13 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 
-import { loadConfig } from "../src/config.js";
-import { closeDatabase } from "../src/db/index.js";
+import { loadConfig, loadConfigForRuntime } from "../src/config.js";
+import { closeDatabase, openDatabase } from "../src/db/index.js";
+import { runMigrations } from "../src/db/migrations/index.js";
+import { allMigrations } from "../src/db/migrations/all.js";
+import { seedFromConfig } from "../src/db/seed.js";
+import { applyDatabaseFallbackConfig } from "../src/runtime-config.js";
+import { insertModel } from "../src/db/repository.js";
 
 let tempDir: string;
 
@@ -34,6 +39,25 @@ const BASE_ENV = {
   GPT_API_KEY: "api-key-c",
 };
 
+const FULL_CONFIG_YAML = `default_model: glm-5.1
+request_timeout_ms: 30000
+max_retries: 0
+max_body_size_kb: 1024
+health_probe_enabled: false
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+model_chains:
+  - name: fallback
+    models:
+      - glm-5.1
+      - gpt-5
+`;
+
 const TWO_MODELS_YAML = `models:
   - name: glm-5.1
     base_url: https://provider-a.example/v1
@@ -44,6 +68,160 @@ const TWO_MODELS_YAML = `models:
 `;
 
 describe("model_chains config", () => {
+  it("falls back to database models when YAML omits models", () => {
+    const seedPath = join(tempDir, "seed-gateway.config.yaml");
+    const fallbackPath = join(tempDir, "fallback-gateway.config.yaml");
+    const dbPath = join(tempDir, "runtime-fallback.db");
+
+    writeFileSync(seedPath, FULL_CONFIG_YAML, "utf8");
+    writeFileSync(
+      fallbackPath,
+      `default_model: glm-5.1
+request_timeout_ms: 30000
+max_retries: 0
+max_body_size_kb: 1024
+health_probe_enabled: false
+model_chains:
+  - name: fallback
+    models:
+      - glm-5.1
+      - gpt-5
+`,
+      "utf8",
+    );
+
+    const seeded = loadConfig({ ...BASE_ENV, GATEWAY_CONFIG_PATH: seedPath, GATEWAY_DB_PATH: dbPath });
+
+    openDatabase({ ...BASE_ENV, GATEWAY_DB_PATH: dbPath });
+    runMigrations(openDatabase({ ...BASE_ENV, GATEWAY_DB_PATH: dbPath }), allMigrations);
+    seedFromConfig(seeded);
+
+    const runtimeLoaded = loadConfigForRuntime({
+      ...BASE_ENV,
+      GATEWAY_CONFIG_PATH: fallbackPath,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    const config = applyDatabaseFallbackConfig(runtimeLoaded.config, runtimeLoaded.sourcePresence, {
+      ...BASE_ENV,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    expect(config.models).toHaveLength(2);
+    expect(config.models.map((model) => model.name).sort()).toEqual(["glm-5.1", "gpt-5"]);
+    expect(config.upstreamBaseUrl).toBe("https://provider-a.example/v1");
+  });
+
+  it("ignores copilot-proxy rows when models fallback reads persisted catalog", () => {
+    const seedPath = join(tempDir, "seed-gateway.config.yaml");
+    const fallbackPath = join(tempDir, "fallback-gateway.config.yaml");
+    const dbPath = join(tempDir, "runtime-fallback.db");
+
+    writeFileSync(seedPath, FULL_CONFIG_YAML, "utf8");
+    writeFileSync(
+      fallbackPath,
+      `default_model: glm-5.1
+request_timeout_ms: 30000
+max_retries: 0
+max_body_size_kb: 1024
+health_probe_enabled: false
+model_chains:
+  - name: fallback
+    models:
+      - glm-5.1
+      - gpt-5
+`,
+      "utf8",
+    );
+
+    const seeded = loadConfig({ ...BASE_ENV, GATEWAY_CONFIG_PATH: seedPath, GATEWAY_DB_PATH: dbPath });
+
+    const db = openDatabase({ ...BASE_ENV, GATEWAY_DB_PATH: dbPath });
+    runMigrations(db, allMigrations);
+    seedFromConfig(seeded);
+
+    insertModel({
+      name: "u0047928-auto",
+      upstream_model: "u0047928-auto",
+      base_url: "",
+      api_key_env: "",
+      owned_by: "copilot-proxy",
+      created: 1_718_000_111,
+      supports_tools: 1,
+      supports_streaming: 1,
+      unknown_field_mode: "warn",
+      unknown_field_window_requests: 100,
+      source: "copilot-proxy",
+      source_prefix: "copilot-",
+      connection_id: "conn-1",
+      status: "active",
+      status_reason: "Copilot proxy registered",
+      status_changed_at: 1_718_000_111,
+      capabilities_json: null,
+      updated_at: 1_718_000_111,
+    });
+
+    const runtimeLoaded = loadConfigForRuntime({
+      ...BASE_ENV,
+      GATEWAY_CONFIG_PATH: fallbackPath,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    const config = applyDatabaseFallbackConfig(runtimeLoaded.config, runtimeLoaded.sourcePresence, {
+      ...BASE_ENV,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    expect(config.models).toHaveLength(2);
+    expect(config.models.map((model) => model.name).sort()).toEqual(["glm-5.1", "gpt-5"]);
+  });
+
+  it("falls back to database model_chains when YAML omits model_chains", () => {
+    const seedPath = join(tempDir, "seed-gateway.config.yaml");
+    const fallbackPath = join(tempDir, "fallback-gateway.config.yaml");
+    const dbPath = join(tempDir, "runtime-fallback.db");
+
+    writeFileSync(seedPath, FULL_CONFIG_YAML, "utf8");
+    writeFileSync(
+      fallbackPath,
+      `default_model: glm-5.1
+request_timeout_ms: 30000
+max_retries: 0
+max_body_size_kb: 1024
+health_probe_enabled: false
+models:
+  - name: glm-5.1
+    base_url: https://provider-a.example/v1
+    api_key_env: GLM_API_KEY
+  - name: gpt-5
+    base_url: https://provider-b.example/v1
+    api_key_env: GPT_API_KEY
+`,
+      "utf8",
+    );
+
+    const seeded = loadConfig({ ...BASE_ENV, GATEWAY_CONFIG_PATH: seedPath, GATEWAY_DB_PATH: dbPath });
+
+    openDatabase({ ...BASE_ENV, GATEWAY_DB_PATH: dbPath });
+    runMigrations(openDatabase({ ...BASE_ENV, GATEWAY_DB_PATH: dbPath }), allMigrations);
+    seedFromConfig(seeded);
+
+    const runtimeLoaded = loadConfigForRuntime({
+      ...BASE_ENV,
+      GATEWAY_CONFIG_PATH: fallbackPath,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    const config = applyDatabaseFallbackConfig(runtimeLoaded.config, runtimeLoaded.sourcePresence, {
+      ...BASE_ENV,
+      GATEWAY_DB_PATH: dbPath,
+    });
+
+    expect(config.modelChains).toHaveLength(1);
+    expect(config.modelChains[0]!.name).toBe("fallback");
+    expect(config.modelChains[0]!.models.map((model) => model.name)).toEqual(["glm-5.1", "gpt-5"]);
+  });
+
   it("loads config with no model_chains section (backward compatible)", () => {
     const { configPath, dbPath } = createTempConfig(TWO_MODELS_YAML);
           const config = loadConfig({ ...BASE_ENV, GATEWAY_CONFIG_PATH: configPath, GATEWAY_DB_PATH: dbPath });
