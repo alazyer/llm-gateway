@@ -92,6 +92,27 @@ npm run build
 npm start
 ```
 
+## Web AI Chat validation (admin console)
+
+The Nuxt admin console includes a **Chat** page for quick model availability validation.
+
+1. Start the gateway (`npm run dev` or `npm start`).
+2. Start the web app:
+
+```bash
+pnpm --filter llm-gateway-web dev
+```
+
+3. Open the dashboard, authenticate, then go to **Chat**.
+4. Select a model discovered from `GET /v1/models` and send a short prompt.
+
+Validation behavior:
+
+- Uses `POST /v1/chat/completions` with stream-first flow when supported by the selected model
+- Applies a default 120s validation timeout
+- Marks models as session-scoped `untested` / `available` / `unavailable`
+- Preserves chat history when switching models and inserts a model-switch divider
+
 ## Health check
 
 ```bash
