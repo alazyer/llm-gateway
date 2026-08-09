@@ -81,7 +81,7 @@
               icon="i-lucide-x"
               size="xs"
               variant="ghost"
-              color="red"
+              color="error"
               :aria-label="`Remove ${m.model_name} from chain`"
               @click="removeModel(idx)"
             />

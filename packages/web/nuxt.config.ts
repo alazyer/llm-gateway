@@ -28,7 +28,7 @@ export default defineNuxtConfig({
     head: {
       title: "LLM Gateway Dashboard",
       meta: [
-        { name: "description", content: "Manage models, chains, and gateway configuration" },
+        { name: "description", content: "Manage models, chains, gateway configuration, and web chat validation" },
       ],
     },
   },
