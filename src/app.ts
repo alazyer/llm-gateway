@@ -19,6 +19,7 @@ import { registerWorkspaceContext } from "./workspace/context.js";
 import { registerWorkspaceAuth } from "./workspace/auth.js";
 import { registerUsageTracking } from "./workspace/usage.js";
 import type { ChatCompletionsTransport } from "./upstream/chat-completions-client.js";
+import { aiChatRoutes } from "./routes/ai-chat.js";
 
 export interface CreateAppOptions {
   config: AppConfig;
@@ -216,6 +217,10 @@ export function createApp(options: CreateAppOptions) {
   }
 
   void app.register(responsesRoutes, routeOptions);
+  const aiChatRouteOptions = options.fetchFn
+    ? { config, fetchFn: options.fetchFn }
+    : { config };
+  void app.register(aiChatRoutes, aiChatRouteOptions);
   void app.register(adminRoutes);
 
   if (config.workspace.enabled) {
