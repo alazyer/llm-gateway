@@ -88,6 +88,9 @@ describe("Fresh database creation", () => {
     expect(tableNames).toContain("model_chains");
     expect(tableNames).toContain("chain_models");
     expect(tableNames).toContain("gateway_config");
+    expect(tableNames).toContain("ai_chat_sessions");
+    expect(tableNames).toContain("ai_chat_messages");
+    expect(tableNames).toContain("ai_chat_audit_events");
   });
 });
 
