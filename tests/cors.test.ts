@@ -265,6 +265,29 @@ describe("CORS support", () => {
       }
     });
 
+    it("allows the x-user-id header for Web AI Chat cross-origin preflight", async () => {
+      const app = createApp({ config: corsAuthConfig });
+
+      try {
+        const response = await app.inject({
+          method: "OPTIONS",
+          url: "/api/ai-chat/messages",
+          headers: {
+            origin: "http://localhost:5173",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "content-type, authorization, x-user-id",
+          },
+        });
+
+        expect(response.statusCode).toBe(204);
+        expect(response.headers["access-control-allow-headers"]).toContain("x-user-id");
+        expect(response.headers["access-control-allow-headers"]).toContain("Authorization");
+        expect(response.headers["access-control-allow-headers"]).toContain("Content-Type");
+      } finally {
+        await app.close();
+      }
+    });
+
     it("CORS headers are added even on 401 auth rejection", async () => {
       const fetchMock = vi.fn();
       const app = createApp({ config: corsAuthConfig, fetchFn: fetchMock as typeof fetch });

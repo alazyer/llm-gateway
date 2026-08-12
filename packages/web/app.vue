@@ -60,7 +60,7 @@ const runtimeConfig = useRuntimeConfig();
 const api = useGatewayApi();
 
 const isAuthPage = computed(() => route.path === "/auth");
-const isWebChatEnabled = computed(() => runtimeConfig.public.webChatValidationEnabled !== false);
+const isWebChatEnabled = computed(() => runtimeConfig.public.webAiChatEnabled !== false);
 
 const navItems = computed(() => [
   { label: "Status", to: "/", icon: "i-lucide-activity" },

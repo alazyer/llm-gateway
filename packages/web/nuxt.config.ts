@@ -21,7 +21,10 @@ export default defineNuxtConfig({
     public: {
       // Gateway API base URL - the backend Fastify server
       gatewayBaseUrl: process.env.GATEWAY_BASE_URL || "http://localhost:3000",
-      webChatValidationEnabled: process.env.WEB_CHAT_VALIDATION_ENABLED !== "false",
+      // Production Web AI Chat enablement flag. Replaces the legacy
+      // `webChatValidationEnabled` toggle: the chat surface now drives the
+      // production `/api/ai-chat/*` capability exclusively.
+      webAiChatEnabled: process.env.WEB_AI_CHAT_ENABLED !== "false",
     },
   },
 
@@ -29,7 +32,7 @@ export default defineNuxtConfig({
     head: {
       title: "LLM Gateway Dashboard",
       meta: [
-        { name: "description", content: "Manage models, chains, gateway configuration, and web chat validation" },
+        { name: "description", content: "Manage models, chains, gateway configuration, and Web AI Chat" },
       ],
     },
   },
