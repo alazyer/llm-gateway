@@ -217,9 +217,11 @@ export function createApp(options: CreateAppOptions) {
   }
 
   void app.register(responsesRoutes, routeOptions);
-  const aiChatRouteOptions = options.fetchFn
-    ? { config, fetchFn: options.fetchFn }
-    : { config };
+  const aiChatRouteOptions: { config: AppConfig; client?: ChatCompletionsTransport; fetchFn?: typeof fetch } = {
+    config,
+    ...(options.client ? { client: options.client } : {}),
+    ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
+  };
   void app.register(aiChatRoutes, aiChatRouteOptions);
   void app.register(adminRoutes);
 

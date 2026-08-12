@@ -364,7 +364,7 @@ describe("createApp", () => {
         error: "Upstream request failed.",
         upstream: {
           statusCode: 401,
-          statusText: "Error",
+          statusText: "AuthenticationError",
         },
       });
       expect(response.body).not.toContain("invalid_api_key");
