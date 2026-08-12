@@ -5,6 +5,12 @@ import { Buffer } from "node:buffer";
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { AppConfig, GatewayModelConfig } from "../config.js";
+import {
+  ChatCompletionsClient,
+  UpstreamHttpError,
+  type ChatCompletionsTransport,
+} from "../upstream/chat-completions-client.js";
+import type { ChatCompletionRequest } from "../contracts.js";
 import { insertAiChatAuditEvent } from "../db/ai-chat-audit-repository.js";
 
 import {
@@ -13,7 +19,9 @@ import {
   insertAiChatMessage,
   listAiChatMessagesBySession,
   listAiChatSessionsByUser,
+  renameAiChatSession,
   touchAiChatSession,
+  updateAiChatSessionModel,
   type AiChatMessageCursor,
   type AiChatSessionCursor,
 } from "../db/ai-chat-repository.js";
@@ -23,6 +31,9 @@ const RATE_LIMIT_MAX_REQUESTS = 30;
 const MAX_TRANSIENT_RETRIES = 2;
 const STREAM_HEARTBEAT_INTERVAL_CHARS = 1;
 const LEGACY_QUICK_VALIDATION_MESSAGES_PATH = "/api/ai-chat/quick-validation/messages";
+const AUTO_TITLE_MAX_LENGTH = 60;
+const SESSION_TITLE_MIN_LENGTH = 1;
+const SESSION_TITLE_MAX_LENGTH = 120;
 
 const LOCALIZED_MESSAGES = {
   RATE_LIMITED: "Rate limit exceeded. Please wait and retry shortly.",
@@ -40,6 +51,7 @@ const sendMessageBodySchema = z.object({
   prompt: z.string().trim().min(1),
   stream: z.boolean().default(true),
   clientMessageId: z.string().uuid(),
+  model: z.string().trim().min(1).optional(),
   context: z.object({
     locale: z.string().optional(),
     timezone: z.string().optional(),
@@ -49,6 +61,10 @@ const sendMessageBodySchema = z.object({
 const paginationQuerySchema = z.object({
   cursor: z.string().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(20),
+});
+
+const renameSessionBodySchema = z.object({
+  title: z.string().trim().min(SESSION_TITLE_MIN_LENGTH).max(SESSION_TITLE_MAX_LENGTH),
 });
 
 class AiChatRouteError extends Error {
@@ -94,7 +110,7 @@ interface UpstreamCallResult {
 
 interface AiChatAuditPayload {
   actor: string;
-  action: "send";
+  action: "send" | "rename";
   requestId: string;
   sessionId: string;
   outcome: string;
@@ -117,6 +133,7 @@ interface UpstreamStreamResult {
 
 interface AiChatRoutesOptions {
   config: AppConfig;
+  client?: ChatCompletionsTransport;
   fetchFn?: typeof fetch;
 }
 
@@ -344,52 +361,105 @@ function parseUpstreamStreamPayload(payload: string): UpstreamStreamResult {
   };
 }
 
-function selectModel(config: AppConfig): GatewayModelConfig {
+/**
+ * Resolve the routable model for a message request, per the precedence:
+ * - For an existing session: the session's stored `model` wins (and is updated
+ *   if the client sends a differing `model`).
+ * - For a new session: the client-supplied `model`, else `config.defaultModel`,
+ *   else the first active model.
+ *
+ * The resolved model must be an active configured model, else `VALIDATION_ERROR`.
+ * The `clientModel`/`sessionModel` may be `null` (new session, no client model;
+ * or a pre-existing session with NULL stored model).
+ */
+function resolveModel(
+  config: AppConfig,
+  sessionModel: string | null,
+  clientModel: string | undefined,
+): { model: GatewayModelConfig; stampedModel: string } {
   if (config.models.length === 0) {
     throw new AiChatRouteError(503, "UPSTREAM_UNAVAILABLE", "No chat model is configured.");
   }
 
-  if (!config.defaultModel) {
-    return config.models[0]!;
+  // A model is routable unless it is explicitly inactive. (The production
+  // loader defaults to "active"; unnormalized configs/tests may omit the field,
+  // so we exclude only explicit "inactive" rather than require "active".)
+  const activeModels = config.models.filter((model) => model.status !== "inactive");
+  if (activeModels.length === 0) {
+    throw new AiChatRouteError(503, "UPSTREAM_UNAVAILABLE", "No chat model is configured.");
   }
 
-  const matched = config.models.find((model) => model.name === config.defaultModel);
-  return matched ?? config.models[0]!;
+  // Existing session: the stored model is authoritative, BUT if the client sends
+  // a differing model, switch to it (mid-session switch). New session: prefer
+  // the client-supplied model, then the default.
+  const desired = (sessionModel !== null && clientModel !== undefined && clientModel !== sessionModel)
+    ? clientModel
+    : (sessionModel ?? clientModel ?? config.defaultModel ?? null);
+
+  const findActive = (name: string | null): GatewayModelConfig | undefined =>
+    name ? activeModels.find((model) => model.name === name) : undefined;
+
+  if (desired) {
+    const matched = findActive(desired);
+    if (!matched) {
+      throw new AiChatRouteError(
+        400,
+        "VALIDATION_ERROR",
+        `Model \`${desired}\` is not available.`,
+      );
+    }
+    return { model: matched, stampedModel: matched.name };
+  }
+
+  // No explicit model: default, else first active.
+  const fallback = config.defaultModel
+    ? findActive(config.defaultModel) ?? activeModels[0]!
+    : activeModels[0]!;
+  return { model: fallback, stampedModel: fallback.name };
+}
+
+/**
+ * Derive a human-readable session title from the first user prompt: the first
+ * `AUTO_TITLE_MAX_LENGTH` characters, trimmed; truncated with a trailing `…`
+ * when the prompt exceeds the limit. Newlines collapse to spaces so the title
+ * renders on one line.
+ */
+function deriveSessionTitle(prompt: string): string {
+  const collapsed = prompt.replace(/\s+/g, " ").trim();
+  if (collapsed.length <= AUTO_TITLE_MAX_LENGTH) {
+    return collapsed;
+  }
+  return `${collapsed.slice(0, AUTO_TITLE_MAX_LENGTH)}…`;
 }
 
 async function callChatCompletionsWithRetry(
   request: FastifyRequest,
   payload: Record<string, unknown>,
   model: GatewayModelConfig,
-  fetchFn: typeof fetch,
+  client: ChatCompletionsTransport,
 ): Promise<UpstreamCallResult> {
   let lastStatusCode = 502;
   let lastBody = "";
   let lastHeaders: Record<string, unknown> = {};
   let retryCount = 0;
 
+  const upstreamRequest = {
+    model: model.upstreamModel,
+    messages: payload.messages as ChatCompletionRequest["messages"],
+    ...(payload.stream !== undefined ? { stream: payload.stream as boolean } : {}),
+  } as ChatCompletionRequest;
+  const isStream = payload.stream === true;
+
   for (let attempt = 0; attempt <= MAX_TRANSIENT_RETRIES; attempt += 1) {
     try {
-      const response = await fetchFn(new URL("/chat/completions", model.baseUrl), {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${model.apiKey}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ...payload,
-          model: model.upstreamModel,
-        }),
-      });
-      const body = await response.text();
-
-      lastStatusCode = response.status;
-      lastBody = body;
-      lastHeaders = Object.fromEntries(response.headers.entries());
-
-      if (response.status < 400) {
+      if (isStream) {
+        const stream = await client.createCompletionStream(upstreamRequest);
+        const body = await drainSseStream(stream);
+        lastStatusCode = 200;
+        lastBody = body;
+        lastHeaders = {};
         return {
-          statusCode: response.status,
+          statusCode: 200,
           body,
           headers: lastHeaders,
           retryCount,
@@ -397,31 +467,66 @@ async function callChatCompletionsWithRetry(
         };
       }
 
-      const upstreamError = parseUpstreamError(response.status, body);
-      if (!isTransientUpstreamStatus(response.status) || attempt === MAX_TRANSIENT_RETRIES) {
-        return {
-          statusCode: response.status,
-          body,
-          headers: lastHeaders,
-          retryCount,
-          errorClass: upstreamError.errorClass,
-        };
+      const response = await client.createCompletion(upstreamRequest);
+      const body = JSON.stringify(response);
+      lastStatusCode = 200;
+      lastBody = body;
+      lastHeaders = {};
+      return {
+        statusCode: 200,
+        body,
+        headers: lastHeaders,
+        retryCount,
+        errorClass: null,
+      };
+    } catch (error) {
+      // ChatCompletionsClient surfaces non-2xx upstream responses as
+      // UpstreamHttpError (carrying statusCode/body) and network/TLS failures
+      // as a plain Error. The OpenAI SDK wraps connection failures
+      // (timeouts, DNS, TLS) as APIConnectionError/APIConnectionTimeoutError,
+      // which the client then surfaces as UpstreamHttpError with a synthetic
+      // 502 status and the SDK error name in `statusText` — detect those and
+      // route them through classifyNetworkFailure so timeouts map to 408 and
+      // other network failures to 503, preserving the route's error taxonomy.
+      const isConnectionFailure = error instanceof UpstreamHttpError
+        && (error.statusText === "APIConnectionError"
+          || error.statusText === "APIConnectionTimeoutError");
+      if (error instanceof UpstreamHttpError && !isConnectionFailure) {
+        lastStatusCode = error.statusCode;
+        lastBody = error.body;
+        lastHeaders = {};
+        const upstreamError = parseUpstreamError(error.statusCode, error.body);
+        if (!isTransientUpstreamStatus(error.statusCode) || attempt === MAX_TRANSIENT_RETRIES) {
+          return {
+            statusCode: error.statusCode,
+            body: error.body,
+            headers: lastHeaders,
+            retryCount,
+            errorClass: upstreamError.errorClass,
+          };
+        }
+        retryCount += 1;
+        request.log.info(
+          {
+            event: "ai_chat_retry",
+            attempt: attempt + 1,
+            maxRetries: MAX_TRANSIENT_RETRIES,
+            statusCode: error.statusCode,
+            retryCount,
+            errorClass: upstreamError.errorClass,
+          },
+          "Retrying transient upstream failure for Web AI Chat.",
+        );
+        continue;
       }
 
-      retryCount += 1;
-      request.log.info(
-        {
-          event: "ai_chat_retry",
-          attempt: attempt + 1,
-          maxRetries: MAX_TRANSIENT_RETRIES,
-          statusCode: response.status,
-          retryCount,
-          errorClass: upstreamError.errorClass,
-        },
-        "Retrying transient upstream failure for Web AI Chat.",
-      );
-    } catch (error) {
-      const classifiedError = classifyNetworkFailure(error);
+      const cause = isConnectionFailure
+        ? new Error(error.body || error.statusText)
+        : error;
+      if (isConnectionFailure && error.statusText === "APIConnectionTimeoutError") {
+        Object.defineProperty(cause, "name", { value: "AbortError" });
+      }
+      const classifiedError = classifyNetworkFailure(cause);
       if (attempt === MAX_TRANSIENT_RETRIES) {
         throw new AiChatRouteError(
           classifiedError.statusCode,
@@ -456,6 +561,27 @@ async function callChatCompletionsWithRetry(
     retryCount,
     errorClass: "UPSTREAM_UNAVAILABLE",
   };
+}
+
+/**
+ * Drain a `ReadableStream<Uint8Array>` of SSE frames (as emitted by
+ * `ChatCompletionsClient.createCompletionStream`) into a single string, so the
+ * route can feed it to the existing buffered `parseUpstreamStreamPayload`.
+ */
+async function drainSseStream(stream: ReadableStream<Uint8Array>): Promise<string> {
+  const reader = stream.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    body += decoder.decode(value, { stream: true });
+  }
+  body += decoder.decode();
+  return body;
 }
 
 function sseEvent(event: string, data: Record<string, unknown>): string {
@@ -526,8 +652,36 @@ function sendRouteError(reply: FastifyReply, error: AiChatRouteError, requestId:
 }
 
 export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app, options) => {
-  const selectedModel = selectModel(options.config);
-  const fetchFn = options.fetchFn ?? fetch;
+  const clientCache = new Map<string, ChatCompletionsTransport>();
+
+  const getClient = (model: GatewayModelConfig): ChatCompletionsTransport => {
+    if (options.client) {
+      return options.client;
+    }
+    const cacheKey = `${model.baseUrl}::${model.apiKey}`;
+    const cached = clientCache.get(cacheKey);
+    if (cached) {
+      return cached;
+    }
+    const clientOptions: {
+      baseUrl: string;
+      apiKey: string;
+      fetchFn?: typeof fetch;
+      maxRetries: number;
+      logger?: { debug: (...args: unknown[]) => void; info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
+    } = {
+      baseUrl: model.baseUrl,
+      apiKey: model.apiKey,
+      maxRetries: 0,
+      logger: app.log.child({ component: "upstream-client", upstreamBaseUrl: model.baseUrl }),
+    };
+    if (options.fetchFn) {
+      clientOptions.fetchFn = options.fetchFn;
+    }
+    const client = new ChatCompletionsClient(clientOptions);
+    clientCache.set(cacheKey, client);
+    return client;
+  };
 
   app.post("/api/ai-chat/messages", async (request, reply) => {
     const requestId = createRequestId();
@@ -602,15 +756,40 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       });
       return sendRouteError(reply, error, requestId);
     }
+
+    let routedModel: ReturnType<typeof resolveModel>;
+    try {
+      routedModel = resolveModel(options.config, existingSession?.model ?? null, parsed.model);
+    } catch (error) {
+      if (error instanceof AiChatRouteError) {
+        writeAuditEvent(request, {
+          actor: userId,
+          action: "send",
+          requestId,
+          sessionId,
+          outcome: "failed",
+          retryCount: error.retryCount,
+          errorClass: error.errorClass,
+        });
+        return sendRouteError(reply, error, requestId);
+      }
+      throw error;
+    }
+
     if (!existingSession) {
       insertAiChatSession({
         id: sessionId,
         user_id: userId,
         created_at: timestamp,
         updated_at: timestamp,
+        model: routedModel.stampedModel,
+        title: deriveSessionTitle(parsed.prompt),
       });
     } else {
       touchAiChatSession(sessionId, timestamp);
+      if (existingSession.model !== routedModel.stampedModel) {
+        updateAiChatSessionModel(sessionId, routedModel.stampedModel);
+      }
     }
 
     const userMessageId = randomUUID();
@@ -642,7 +821,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
         upstream = await callChatCompletionsWithRetry(request, {
           stream: false,
           messages: [{ role: "user", content: parsed.prompt }],
-        }, selectedModel, fetchFn);
+        }, routedModel.model, getClient(routedModel.model));
       } catch (error) {
         if (error instanceof AiChatRouteError) {
           writeAuditEvent(request, {
@@ -678,7 +857,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
           user_id: userId,
           role: "assistant",
           content: "",
-          model: null,
+          model: routedModel.stampedModel,
           request_id: requestId,
           status: "failed",
           input_tokens: null,
@@ -735,7 +914,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
         user_id: userId,
         role: "assistant",
         content: assistantContent,
-        model: typeof upstreamBody.model === "string" ? upstreamBody.model : null,
+        model: routedModel.stampedModel,
         request_id: assistantRequestId,
         status: "done",
         input_tokens: inputTokens,
@@ -782,7 +961,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
           outputTokens,
           totalTokens,
         },
-        model: typeof upstreamBody.model === "string" ? upstreamBody.model : null,
+        model: routedModel.stampedModel,
         requestId: assistantRequestId,
       });
     }
@@ -793,7 +972,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       upstream = await callChatCompletionsWithRetry(request, {
         stream: true,
         messages: [{ role: "user", content: parsed.prompt }],
-      }, selectedModel, fetchFn);
+      }, routedModel.model, getClient(routedModel.model));
     } catch (error) {
       if (error instanceof AiChatRouteError) {
         upstream = {
@@ -849,7 +1028,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
         user_id: userId,
         role: "assistant",
         content: assistantContent,
-        model: null,
+        model: routedModel.stampedModel,
         request_id: terminalRequestId,
         status: "failed",
         input_tokens: streamResult.usage?.inputTokens ?? null,
@@ -895,7 +1074,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       frames.push(sseEvent("started", {
         sessionId,
         messageId: assistantMessageId,
-        model: null,
+        model: routedModel.stampedModel,
         requestId: terminalRequestId,
       }));
       let charsSinceHeartbeat = 0;
@@ -917,7 +1096,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       user_id: userId,
       role: "assistant",
       content: assistantContent,
-      model: null,
+      model: routedModel.stampedModel,
       request_id: terminalRequestId,
       status: "done",
       input_tokens: streamResult.usage?.inputTokens ?? null,
@@ -963,7 +1142,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
     frames.push(sseEvent("started", {
       sessionId,
       messageId: assistantMessageId,
-      model: null,
+      model: routedModel.stampedModel,
       requestId: terminalRequestId,
     }));
     for (const delta of streamResult.deltas) {
@@ -1019,10 +1198,76 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
     return reply.code(200).send({
       data: page.map((row) => ({
         sessionId: row.id,
+        title: row.title,
+        model: row.model,
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       })),
       nextCursor,
+    });
+  });
+
+  app.patch("/api/ai-chat/sessions/:sessionId", async (request, reply) => {
+    const requestId = createRequestId();
+    const userId = extractUserId(request);
+    if (!userId) {
+      return sendRouteError(reply, new AiChatRouteError(401, "UNAUTHORIZED", localizedMessage("UNAUTHORIZED")), requestId);
+    }
+
+    const params = request.params as { sessionId?: string };
+    if (!params.sessionId) {
+      return sendRouteError(reply, new AiChatRouteError(400, "VALIDATION_ERROR", "Missing sessionId path parameter."), requestId);
+    }
+
+    try {
+      ensureOwnedSession(params.sessionId, userId);
+    } catch (error) {
+      if (error instanceof AiChatRouteError) {
+        writeAuditEvent(request, {
+          actor: userId,
+          action: "rename",
+          requestId,
+          sessionId: params.sessionId,
+          outcome: "denied",
+          retryCount: 0,
+          errorClass: error.errorClass,
+        });
+        return sendRouteError(reply, error, requestId);
+      }
+      throw error;
+    }
+
+    const bodyResult = renameSessionBodySchema.safeParse(request.body);
+    if (!bodyResult.success) {
+      const error = new AiChatRouteError(400, "VALIDATION_ERROR", bodyResult.error.message);
+      writeAuditEvent(request, {
+        actor: userId,
+        action: "rename",
+        requestId,
+        sessionId: params.sessionId,
+        outcome: "failed",
+        retryCount: 0,
+        errorClass: error.errorClass,
+      });
+      return sendRouteError(reply, error, requestId);
+    }
+
+    const updatedAt = nowMillis();
+    renameAiChatSession(params.sessionId, bodyResult.data.title, updatedAt);
+    writeAuditEvent(request, {
+      actor: userId,
+      action: "rename",
+      requestId,
+      sessionId: params.sessionId,
+      outcome: "completed",
+      retryCount: 0,
+      errorClass: null,
+    });
+
+    return reply.code(200).send({
+      sessionId: params.sessionId,
+      title: bodyResult.data.title,
+      updatedAt,
     });
   });
 

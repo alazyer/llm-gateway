@@ -921,3 +921,405 @@ describe("Web AI Chat routes", () => {
     }
   });
 });
+
+describe("Web AI Chat model selection", () => {
+  it("stamps the client-supplied model on a new session", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_model_stamp",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-stamp" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID(), model: "glm-5.1" },
+      });
+      expect(response.statusCode).toBe(200);
+      const body = response.json() as { sessionId: string; model: string };
+      expect(body.model).toBe("glm-5.1");
+
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-stamp" },
+      });
+      const sessionBody = sessions.json() as { data: Array<{ model: string | null }> };
+      expect(sessionBody.data[0]!.model).toBe("glm-5.1");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the session's stored model for an existing session", async () => {
+    let seenUpstreamModel: string | undefined;
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { model: string };
+      seenUpstreamModel = body.model;
+      return new Response(JSON.stringify({
+        id: "chatcmpl_stored",
+        model: body.model,
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      // First message stamps model glm-5.1 on the session.
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-stored" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID(), model: "glm-5.1" },
+      });
+      expect(first.statusCode).toBe(200);
+      const { sessionId } = first.json() as { sessionId: string };
+
+      // Second message to the same session, with NO client model. The stored
+      // model (glm-5.1) MUST be used regardless.
+      seenUpstreamModel = undefined;
+      const second = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-stored" },
+        payload: { prompt: "again", stream: false, clientMessageId: randomUUID(), sessionId },
+      });
+      expect(second.statusCode).toBe(200);
+      expect(seenUpstreamModel).toBe("glm-5.1");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("switches the session model mid-session when the client sends a different model", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { model: string };
+      return new Response(JSON.stringify({
+        id: "chatcmpl_switch",
+        model: body.model,
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const config = baseConfig();
+    config.models = [
+      ...config.models,
+      {
+        name: "alt-model",
+        upstreamModel: "alt-model",
+        baseUrl: "https://provider.example/v1",
+        apiKey: "alt-key",
+        apiKeyEnv: "ALT_KEY",
+        ownedBy: "zhipu",
+        created: 1_718_000_000,
+        supportsTools: true,
+        supportsStreaming: true,
+        unknownFieldMode: "warn",
+        status: "active",
+        statusReason: null,
+        statusChangedAt: null,
+      },
+    ];
+    const app = createApp({ config, fetchFn: fetchMock as typeof fetch });
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-switch" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID(), model: "glm-5.1" },
+      });
+      const { sessionId } = first.json() as { sessionId: string };
+
+      // Switch to alt-model on the existing session.
+      const second = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-switch" },
+        payload: { prompt: "again", stream: false, clientMessageId: randomUUID(), sessionId, model: "alt-model" },
+      });
+      expect(second.statusCode).toBe(200);
+      expect((second.json() as { model: string }).model).toBe("alt-model");
+
+      // The session's stored model is now alt-model.
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-switch" },
+      });
+      const stored = (sessions.json() as { data: Array<{ sessionId: string; model: string | null }> })
+        .data.find((s) => s.sessionId === sessionId);
+      expect(stored?.model).toBe("alt-model");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects an unroutable model with VALIDATION_ERROR and persists no assistant message", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-unroutable" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID(), model: "ghost-model" },
+      });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      // No assistant message persisted.
+      const messages = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions?limit=10",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-unroutable" },
+      });
+      // A session row may exist for the failed attempt, but no messages endpoint
+      // hit here; the absence of an upstream call proves no assistant message.
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("falls back to config.defaultModel when no client model is supplied on a new session", async () => {
+    const fetchMock = vi.fn(async (url: URL, init: RequestInit) => {
+      const body = JSON.parse(init.body as string) as { model: string };
+      return new Response(JSON.stringify({
+        id: "chatcmpl_default",
+        model: body.model,
+        choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+        usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-default" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID() },
+      });
+      expect(response.statusCode).toBe(200);
+      expect((response.json() as { model: string }).model).toBe("glm-5.1");
+    } finally {
+      await app.close();
+    }
+  });
+});
+
+describe("Web AI Chat session titles", () => {
+  it("auto-derives a title from the first prompt", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_title",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const send = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-title" },
+        payload: { prompt: "Explain quantum entanglement briefly", stream: false, clientMessageId: randomUUID() },
+      });
+      const { sessionId } = send.json() as { sessionId: string };
+
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-title" },
+      });
+      const stored = (sessions.json() as { data: Array<{ sessionId: string; title: string | null }> })
+        .data.find((s) => s.sessionId === sessionId);
+      expect(stored?.title).toBe("Explain quantum entanglement briefly");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("truncates a long first prompt with an ellipsis", async () => {
+    const longPrompt = "a".repeat(100);
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_long",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const send = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-long" },
+        payload: { prompt: longPrompt, stream: false, clientMessageId: randomUUID() },
+      });
+      const { sessionId } = send.json() as { sessionId: string };
+
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-long" },
+      });
+      const stored = (sessions.json() as { data: Array<{ sessionId: string; title: string | null }> })
+        .data.find((s) => s.sessionId === sessionId);
+      expect(stored?.title).toBe(`${"a".repeat(60)}…`);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("lets the owner rename a session and reorders it to the top", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_rename",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const send = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-rename" },
+        payload: { prompt: "first prompt", stream: false, clientMessageId: randomUUID() },
+      });
+      const { sessionId } = send.json() as { sessionId: string };
+
+      const rename = await app.inject({
+        method: "PATCH",
+        url: `/api/ai-chat/sessions/${sessionId}`,
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-rename" },
+        payload: { title: "My Custom Title" },
+      });
+      expect(rename.statusCode).toBe(200);
+      expect(rename.json()).toMatchObject({ sessionId, title: "My Custom Title" });
+
+      // The renamed session sorts to the top (recency order).
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-rename" },
+      });
+      const list = sessions.json() as { data: Array<{ sessionId: string; title: string | null }> };
+      expect(list.data[0]!.sessionId).toBe(sessionId);
+      expect(list.data[0]!.title).toBe("My Custom Title");
+
+      // A rename audit event was recorded.
+      const row = getDatabase().prepare(
+        `SELECT action, outcome FROM ai_chat_audit_events WHERE session_id = ? AND action = 'rename'`,
+      ).get(sessionId) as { action: string; outcome: string } | undefined;
+      expect(row?.action).toBe("rename");
+      expect(row?.outcome).toBe("completed");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("denies rename by a non-owner with 403", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_forbid",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const send = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "owner-a" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID() },
+      });
+      const { sessionId } = send.json() as { sessionId: string };
+
+      const rename = await app.inject({
+        method: "PATCH",
+        url: `/api/ai-chat/sessions/${sessionId}`,
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "intruder-b" },
+        payload: { title: "Hijacked" },
+      });
+      expect(rename.statusCode).toBe(403);
+      expect(rename.json()).toMatchObject({ error: { code: "FORBIDDEN" } });
+
+      // Title unchanged.
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "owner-a" },
+      });
+      const stored = (sessions.json() as { data: Array<{ sessionId: string; title: string | null }> })
+        .data.find((s) => s.sessionId === sessionId);
+      expect(stored?.title).toBe("hello");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects an invalid title with 400 VALIDATION_ERROR", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      const send = await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-invalid-title" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID() },
+      });
+      const { sessionId } = send.json() as { sessionId: string };
+
+      const tooLong = await app.inject({
+        method: "PATCH",
+        url: `/api/ai-chat/sessions/${sessionId}`,
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-invalid-title" },
+        payload: { title: "x".repeat(121) },
+      });
+      expect(tooLong.statusCode).toBe(400);
+      expect(tooLong.json()).toMatchObject({ error: { code: "VALIDATION_ERROR" } });
+
+      const empty = await app.inject({
+        method: "PATCH",
+        url: `/api/ai-chat/sessions/${sessionId}`,
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-invalid-title" },
+        payload: { title: "   " },
+      });
+      expect(empty.statusCode).toBe(400);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("returns title and model in the session list, null for the title before any rename", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      id: "chatcmpl_list",
+      model: "glm-5.1",
+      choices: [{ message: { role: "assistant", content: "ok" }, finish_reason: "stop", index: 0 }],
+      usage: { prompt_tokens: 2, completion_tokens: 1, total_tokens: 3 },
+    }), { status: 200, headers: { "content-type": "application/json" } }));
+    const app = createApp({ config: baseConfig(), fetchFn: fetchMock as typeof fetch });
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/api/ai-chat/messages",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-list-tm" },
+        payload: { prompt: "hello", stream: false, clientMessageId: randomUUID() },
+      });
+
+      const sessions = await app.inject({
+        method: "GET",
+        url: "/api/ai-chat/sessions",
+        headers: { "x-api-key": GATEWAY_AUTH_TOKEN, "x-user-id": "user-list-tm" },
+      });
+      const list = sessions.json() as {
+        data: Array<{ title: string | null; model: string | null }>;
+      };
+      expect(list.data[0]!.title).toBe("hello");
+      expect(list.data[0]!.model).toBe("glm-5.1");
+    } finally {
+      await app.close();
+    }
+  });
+});

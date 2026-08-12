@@ -3,6 +3,7 @@ import type { Migration } from "./index.js";
 import { migration001Initial } from "./001-initial.js";
 import { migration002AiChat } from "./002-ai-chat.js";
 import { migration003AiChatAuditEvents } from "./003-ai-chat-audit-events.js";
+import { migration004AiChatModelTitle } from "./004-ai-chat-model-title.js";
 
 /**
  * Ordered list of all known migrations.
@@ -12,4 +13,5 @@ export const allMigrations: Migration[] = [
   migration001Initial,
   migration002AiChat,
   migration003AiChatAuditEvents,
+  migration004AiChatModelTitle,
 ];

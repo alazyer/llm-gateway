@@ -5,6 +5,8 @@ export interface AiChatSessionRow {
   user_id: string;
   created_at: number;
   updated_at: number;
+  model: string | null;
+  title: string | null;
 }
 
 export interface AiChatMessageRow {
@@ -32,14 +34,44 @@ export function getAiChatSessionById(sessionId: string): AiChatSessionRow | null
 export function insertAiChatSession(session: AiChatSessionRow): void {
   const db = getDatabase();
   db.prepare(
-    `INSERT INTO ai_chat_sessions (id, user_id, created_at, updated_at)
-     VALUES (?, ?, ?, ?)`,
-  ).run(session.id, session.user_id, session.created_at, session.updated_at);
+    `INSERT INTO ai_chat_sessions (id, user_id, created_at, updated_at, model, title)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(
+    session.id,
+    session.user_id,
+    session.created_at,
+    session.updated_at,
+    session.model,
+    session.title,
+  );
 }
 
 export function touchAiChatSession(sessionId: string, updatedAt: number): void {
   const db = getDatabase();
   db.prepare("UPDATE ai_chat_sessions SET updated_at = ? WHERE id = ?").run(updatedAt, sessionId);
+}
+
+/**
+ * Update a session's selected model (mid-session switch). Does not touch
+ * `updated_at` — a model switch is not a content change that should reorder
+ * the session list.
+ */
+export function updateAiChatSessionModel(sessionId: string, model: string): void {
+  const db = getDatabase();
+  db.prepare("UPDATE ai_chat_sessions SET model = ? WHERE id = ?").run(model, sessionId);
+}
+
+/**
+ * Rename a session's title and bump `updated_at` so a renamed session sorts to
+ * the top of the recency-ordered session list.
+ */
+export function renameAiChatSession(sessionId: string, title: string, updatedAt: number): void {
+  const db = getDatabase();
+  db.prepare("UPDATE ai_chat_sessions SET title = ?, updated_at = ? WHERE id = ?").run(
+    title,
+    updatedAt,
+    sessionId,
+  );
 }
 
 export function insertAiChatMessage(message: AiChatMessageRow): void {
