@@ -40,6 +40,7 @@ import {
   type ChatCompletionsTransport,
   UpstreamHttpError,
 } from "../upstream/chat-completions-client.js";
+import { flattenChatMessageContentToText } from "../shared.js";
 
 const metadataValueSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
 
@@ -429,7 +430,7 @@ function buildCopilotProxyRequest(
     model: model.id,
     messages: request.messages.map((message) => ({
       role: message.role,
-      content: message.content ?? "",
+      content: flattenChatMessageContentToText(message.content),
       ...(message.tool_call_id ? { tool_call_id: message.tool_call_id } : {}),
       ...(message.tool_calls ? { tool_calls: message.tool_calls } : {}),
     })),
@@ -1823,7 +1824,12 @@ function hasUsableMessageContent(message: ResponseMessageItem): boolean {
     return message.content.trim().length > 0;
   }
 
-  return message.content.some((part) => part.text.trim().length > 0);
+  return message.content.some((part) => {
+    if (part.type === "input_image") {
+      return true;
+    }
+    return part.text.trim().length > 0;
+  });
 }
 
 function normalizeOptionalString(value: string | undefined): string | undefined {
@@ -1904,7 +1910,7 @@ function isResponseMessageItem(value: unknown): value is ResponseMessageItem {
     return true;
   }
 
-  return Array.isArray(value.content) && value.content.every(isTextContent);
+  return Array.isArray(value.content) && value.content.every(isResponseContentPart);
 }
 
 function isResponsesTool(value: unknown): value is import("../contracts.js").ResponsesTool {
@@ -1917,18 +1923,38 @@ function isResponsesTool(value: unknown): value is import("../contracts.js").Res
   );
 }
 
-function isTextContent(
+function isResponseContentPart(
   value: unknown,
 ): value is ResponseMessageItem["content"] extends infer Content
   ? Content extends Array<infer Item>
     ? Item
     : never
   : never {
-  return (
-    isRecord(value) &&
-    typeof value.type === "string" &&
-    typeof value.text === "string"
-  );
+  if (!isRecord(value) || typeof value.type !== "string") {
+    return false;
+  }
+  if (value.type === "input_text" || value.type === "output_text") {
+    return typeof value.text === "string";
+  }
+  if (value.type === "input_image") {
+    // Accept either {image_url: "<data-or-http-url>"} (Beacon-flavored) or
+    // {image_url: {url: string, detail?: "auto"|"low"|"high"}} (OpenAI-standard).
+    if (typeof value.image_url === "string") {
+      return value.image_url.length > 0;
+    }
+    if (isRecord(value.image_url)) {
+      return (
+        typeof value.image_url.url === "string" &&
+        value.image_url.url.length > 0 &&
+        (value.image_url.detail === undefined ||
+          value.image_url.detail === "auto" ||
+          value.image_url.detail === "low" ||
+          value.image_url.detail === "high")
+      );
+    }
+    return false;
+  }
+  return false;
 }
 
 function isResponseRole(value: unknown): value is ResponseMessageItem["role"] {

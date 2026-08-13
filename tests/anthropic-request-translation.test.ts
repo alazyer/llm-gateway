@@ -386,6 +386,142 @@ describe("buildChatCompletionRequestFromAnthropic", () => {
       "messages[0].content[0] tool_use blocks are not valid in user messages.",
     );
   });
+
+  it("translates user image blocks (base64 source) into image_url content parts", () => {
+    // 1x1 white PNG (minimal valid PNG bytes, base64).
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    expect(
+      buildChatCompletionRequestFromAnthropic({
+        model: "doubao-seed-2.1-pro",
+        max_tokens: 256,
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: pngBase64,
+                },
+              },
+              { type: "text", text: "你看见了什么？" },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      model: "doubao-seed-2.1-pro",
+      max_completion_tokens: 256,
+      messages: [
+        {
+          role: "user",
+          content: [
+            {
+              type: "image_url",
+              image_url: { url: `data:image/png;base64,${pngBase64}` },
+            },
+            { type: "text", text: "你看见了什么？" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("preserves text-only fast path (user content collapses to string)", () => {
+    expect(
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: "hello" },
+              { type: "text", text: "world" },
+            ],
+          },
+        ],
+      }).messages,
+    ).toEqual([{ role: "user", content: "hello\nworld" }]);
+  });
+
+  it("rejects image blocks in assistant and system messages", () => {
+    expect(() =>
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "AAA",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrowError(/image blocks are not valid in assistant messages/);
+
+    expect(() =>
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "system",
+            content: [
+              { type: "text", text: "sys" },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "AAA",
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrowError(/only text blocks are valid in system messages/);
+  });
+
+  it("rejects malformed image sources with explicit errors", () => {
+    expect(() =>
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "user",
+            content: [{ type: "image", source: { type: "url", url: "..." } } as never],
+          },
+        ],
+      }),
+    ).toThrowError(/source.type must be "base64"/);
+
+    expect(() =>
+      buildChatCompletionRequestFromAnthropic({
+        model: "claude-sonnet-4-5",
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/tiff", data: "AAA" },
+              },
+            ],
+          },
+        ],
+      }),
+    ).toThrowError(/media_type must be one of/);
+  });
 });
 
 describe("estimateAnthropicInputTokens", () => {

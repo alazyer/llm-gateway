@@ -1,12 +1,17 @@
 import type {
+  AnthropicImageBlock,
+  AnthropicImageSource,
   AnthropicMessage,
   AnthropicMessageBlock,
   AnthropicMessagesRequest,
   AnthropicTextBlock,
   AnthropicTool,
   AnthropicToolResultBlock,
+  ChatContentPart,
   ChatCompletionRequest,
+  ChatImageUrlContentPart,
   ChatMessage,
+  ChatTextContentPart,
   ChatTool,
   ChatToolChoice,
   ChatToolCall,
@@ -73,7 +78,61 @@ function normalizeToolResultContent(
   return text;
 }
 
-function normalizeToolUseBlock(
+const SUPPORTED_IMAGE_MEDIA_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+]);
+
+function normalizeImageSource(
+  value: unknown,
+  context: string,
+): AnthropicImageSource {
+  if (!isRecord(value)) {
+    throw new Error(`${context} must be an object.`);
+  }
+
+  const sourceType = expectString(value.type, `${context}.type`);
+  if (sourceType !== "base64") {
+    throw new Error(
+      `${context}.type must be "base64" (only base64-encoded image sources are supported).`,
+    );
+  }
+
+  const mediaType = expectString(value.media_type, `${context}.media_type`);
+  if (!SUPPORTED_IMAGE_MEDIA_TYPES.has(mediaType)) {
+    throw new Error(
+      `${context}.media_type must be one of: ${[...SUPPORTED_IMAGE_MEDIA_TYPES].join(", ")}.`,
+    );
+  }
+
+  const data = expectString(value.data, `${context}.data`);
+  // Best-effort guard: base64 should not contain whitespace or non-base64 chars.
+  if (!/^[A-Za-z0-9+/]+=*$/.test(data)) {
+    throw new Error(
+      `${context}.data must be a base64-encoded string.`,
+    );
+  }
+
+  return { type: "base64", media_type: mediaType, data };
+}
+
+function normalizeImageBlock(
+  value: Record<string, unknown>,
+  context: string,
+): AnthropicImageBlock {
+  return {
+    type: "image",
+    source: normalizeImageSource(value.source, `${context}.source`),
+  };
+}
+
+function toDataUrl(source: AnthropicImageSource): string {
+  return `data:${source.media_type};base64,${source.data}`;
+}
+
+function normalizeContentBlock(
   value: unknown,
   context: string,
 ): AnthropicMessageBlock {
@@ -88,6 +147,8 @@ function normalizeToolUseBlock(
         type: "text",
         text: expectString(value.text, `${context}.text`),
       };
+    case "image":
+      return normalizeImageBlock(value, context);
     case "tool_use": {
       const input = value.input;
       if (!isRecord(input)) {
@@ -122,9 +183,17 @@ function normalizeToolUseBlock(
     }
     default:
       throw new Error(
-        `${context}.type must be one of: text, tool_use, tool_result.`,
+        `${context}.type must be one of: text, image, tool_use, tool_result.`,
       );
   }
+}
+
+/** @deprecated Use normalizeContentBlock. Kept as a thin alias for callers. */
+function normalizeToolUseBlock(
+  value: unknown,
+  context: string,
+): AnthropicMessageBlock {
+  return normalizeContentBlock(value, context);
 }
 
 function normalizeToolResultContentArray(
@@ -150,7 +219,7 @@ function normalizeMessageContent(
     throw new Error(`${context} must be a string or an array of content blocks.`);
   }
 
-  return content.map((block, index) => normalizeToolUseBlock(block, `${context}[${index}]`));
+  return content.map((block, index) => normalizeContentBlock(block, `${context}[${index}]`));
 }
 
 function normalizeAssistantMessage(
@@ -179,6 +248,10 @@ function normalizeAssistantMessage(
       case "tool_result":
         throw new Error(
           `${context}.content[${index}] tool_result blocks are not valid in assistant messages.`,
+        );
+      case "image":
+        throw new Error(
+          `${context}.content[${index}] image blocks are not valid in assistant messages.`,
         );
     }
   }
@@ -214,33 +287,60 @@ function normalizeSystemMessage(
   };
 }
 
+function imageBlockToChatPart(block: AnthropicImageBlock): ChatImageUrlContentPart {
+  return {
+    type: "image_url",
+    image_url: { url: toDataUrl(block.source) },
+  };
+}
+
 function normalizeUserMessage(
   message: AnthropicMessage,
   context: string,
 ): ChatMessage[] {
   const blocks = normalizeMessageContent(message.content, `${context}.content`);
   const translated: ChatMessage[] = [];
+  // Buffered user content: parallel arrays so we can emit either a plain string
+  // (text-only) or a full ChatContentPart[] when images are present.
   const textParts: string[] = [];
+  const contentParts: ChatContentPart[] = [];
+  let hasImages = false;
 
-  const flushText = () => {
-    if (textParts.length === 0) {
+  const flushUser = () => {
+    if (textParts.length === 0 && !hasImages) {
       return;
     }
 
-    translated.push({
-      role: "user",
-      content: textParts.join("\n"),
-    });
+    if (!hasImages) {
+      translated.push({
+        role: "user",
+        content: textParts.join("\n"),
+      });
+    } else {
+      // Finalize parts array, preserving order.
+      translated.push({
+        role: "user",
+        content: [...contentParts],
+      });
+    }
+
     textParts.length = 0;
+    contentParts.length = 0;
+    hasImages = false;
   };
 
   for (const [index, block] of blocks.entries()) {
     switch (block.type) {
       case "text":
         textParts.push(block.text);
+        contentParts.push({ type: "text", text: block.text });
+        break;
+      case "image":
+        hasImages = true;
+        contentParts.push(imageBlockToChatPart(block));
         break;
       case "tool_result":
-        flushText();
+        flushUser();
         translated.push({
           role: "tool",
           tool_call_id: block.tool_use_id,
@@ -254,7 +354,7 @@ function normalizeUserMessage(
     }
   }
 
-  flushText();
+  flushUser();
   return translated;
 }
 
@@ -501,6 +601,12 @@ function countMessageTokens(message: AnthropicMessage): number {
     switch (block.type) {
       case "text":
         total += countStringTokens(block.text);
+        break;
+      case "image":
+        // Rough estimate: count base64 characters scaled down. Real vision
+        // token counts vary by resolution; this is intentionally conservative
+        // so budgets don't silently overrun.
+        total += Math.max(1, Math.ceil(block.source.data.length / 4));
         break;
       case "tool_use":
         total += countStringTokens(block.name);

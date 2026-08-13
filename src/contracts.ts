@@ -26,10 +26,22 @@ export interface ResponseTextContent {
   text: string;
 }
 
+export interface ResponseInputImageContent {
+  type: "input_image";
+  /**
+   * Beacon-style flat string (data URL or remote URL) or OpenAI-standard
+   * object form `{ url, detail? }`.
+   */
+  image_url: string | { url: string; detail?: "auto" | "low" | "high" };
+  detail?: "auto" | "low" | "high";
+}
+
+export type ResponseContentPart = ResponseTextContent | ResponseInputImageContent;
+
 export interface ResponseMessageItem {
   type: "message";
   role: ResponseRole;
-  content: string | ResponseTextContent[];
+  content: string | ResponseContentPart[];
 }
 
 export interface ResponsesFunctionCall {
@@ -86,9 +98,26 @@ export interface ResponseRequest {
   store?: boolean;
 }
 
+export interface ChatTextContentPart {
+  type: "text";
+  text: string;
+}
+
+export interface ChatImageUrl {
+  url: string;
+  detail?: "auto" | "low" | "high";
+}
+
+export interface ChatImageUrlContentPart {
+  type: "image_url";
+  image_url: ChatImageUrl;
+}
+
+export type ChatContentPart = ChatTextContentPart | ChatImageUrlContentPart;
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string | null;
+  content: string | null | ChatContentPart[];
   tool_call_id?: string;
   tool_calls?: ChatToolCall[];
 }
@@ -184,6 +213,17 @@ export interface AnthropicTextBlock {
   text: string;
 }
 
+export interface AnthropicImageSource {
+  type: "base64";
+  media_type: string;
+  data: string;
+}
+
+export interface AnthropicImageBlock {
+  type: "image";
+  source: AnthropicImageSource;
+}
+
 export interface AnthropicToolUseBlock {
   type: "tool_use";
   id: string;
@@ -200,6 +240,7 @@ export interface AnthropicToolResultBlock {
 
 export type AnthropicMessageBlock =
   | AnthropicTextBlock
+  | AnthropicImageBlock
   | AnthropicToolUseBlock
   | AnthropicToolResultBlock;
 

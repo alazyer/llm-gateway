@@ -97,11 +97,11 @@ describe("normalizeResponseInputToMessages", () => {
         {
           type: "message",
           role: "user",
-          content: [{ type: "input_image", text: "ignored" } as never],
+          content: [{ type: "input_audio", audio_url: "..." } as never],
         },
       ]),
     ).toThrowError(
-      "input[0].content[0].type must be one of: input_text, output_text.",
+      "input[0].content[0].type must be one of: input_text, output_text, input_image.",
     );
   });
 });
@@ -298,5 +298,131 @@ describe("buildChatCompletionRequest", () => {
         tool_choice: { type: "function", name: "shell" },
       }).tool_choice,
     ).toEqual({ type: "function", function: { name: "shell" } });
+  });
+
+  it("translates input_image blocks (data URL) into image_url content parts", () => {
+    const dataUrl =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+    expect(
+      buildChatCompletionRequest({
+        model: "doubao-seed-2.1-pro",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_image", image_url: dataUrl },
+              { type: "input_text", text: "你看见了什么？" },
+            ],
+          },
+        ],
+      }),
+    ).toEqual({
+      model: "doubao-seed-2.1-pro",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "image_url", image_url: { url: dataUrl } },
+            { type: "text", text: "你看见了什么？" },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("accepts input_image.image_url in OpenAI object form {url, detail}", () => {
+    expect(
+      buildChatCompletionRequest({
+        model: "doubao-seed-2.1-pro",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              {
+                type: "input_image",
+                image_url: { url: "https://example.com/a.png", detail: "high" },
+              },
+              { type: "input_text", text: "describe" },
+            ],
+          },
+        ],
+      }).messages,
+    ).toEqual([
+      {
+        role: "user",
+        content: [
+          {
+            type: "image_url",
+            image_url: { url: "https://example.com/a.png", detail: "high" },
+          },
+          { type: "text", text: "describe" },
+        ],
+      },
+    ]);
+  });
+
+  it("preserves text-only fast path (content stays a string)", () => {
+    expect(
+      buildChatCompletionRequest({
+        model: "gpt-4.1",
+        input: [
+          {
+            type: "message",
+            role: "user",
+            content: [
+              { type: "input_text", text: "hello" },
+              { type: "output_text", text: "world" },
+            ],
+          },
+        ],
+      }).messages,
+    ).toEqual([{ role: "user", content: "hello\nworld" }]);
+  });
+
+  it("rejects input_image blocks in non-user messages", () => {
+    expect(() =>
+      buildChatCompletionRequest({
+        model: "doubao-seed-2.1-pro",
+        input: [
+          {
+            type: "message",
+            role: "system",
+            content: [
+              {
+                type: "input_image",
+                image_url: "data:image/png;base64,AAA",
+              },
+              { type: "input_text", text: "system prompt" },
+            ],
+          },
+        ],
+      }),
+    ).toThrowError(/input_image blocks are only valid in user messages/);
+  });
+
+  it("throws explicit errors for malformed input_image blocks", () => {
+    expect(() =>
+      normalizeResponseInputToMessages([
+        {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_image" } as never],
+        },
+      ]),
+    ).toThrowError(/image_url must be a string/);
+
+    expect(() =>
+      normalizeResponseInputToMessages([
+        {
+          type: "message",
+          role: "user",
+          content: [
+            { type: "input_image", image_url: "data:...", detail: "ultra" } as never,
+          ],
+        },
+      ]),
+    ).toThrowError(/detail must be one of/);
   });
 });

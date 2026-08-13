@@ -54,3 +54,35 @@ export function extractDataFrame(frame: string): string | null {
 
   return dataLines.length > 0 ? dataLines.join("\n") : null;
 }
+
+import type { ChatMessage } from "./contracts.js";
+
+/**
+ * Flatten a chat message's `content` (string | null | ChatContentPart[]) to a
+ * plain string. Image parts are reduced to a short placeholder so that
+ * text-only sinks (e.g. Copilot proxy websocket) never receive a non-string
+ * payload. Text parts are concatenated with newlines, preserving existing
+ * string-content behavior.
+ */
+export function flattenChatMessageContentToText(
+  content: ChatMessage["content"],
+): string {
+  if (content === null || content === undefined) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  return content
+    .map((part) => {
+      if (part.type === "text") {
+        return part.text;
+      }
+      if (part.type === "image_url") {
+        return "[image]";
+      }
+      return "";
+    })
+    .filter((s) => s.length > 0)
+    .join("\n");
+}

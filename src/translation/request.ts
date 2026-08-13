@@ -1,9 +1,14 @@
 import type {
+  ChatContentPart,
   ChatCompletionRequest,
+  ChatImageUrlContentPart,
   ChatMessage,
+  ChatTextContentPart,
   ChatTool,
   ChatToolChoice,
+  ResponseContentPart,
   ResponseInput,
+  ResponseInputImageContent,
   ResponseInputItem,
   ResponseMessageItem,
   ResponseRequest,
@@ -22,9 +27,14 @@ const SUPPORTED_ROLES = new Set<ResponseRole>([
   "system",
   "developer",
 ]);
-const SUPPORTED_CONTENT_TYPES = new Set<ResponseTextContent["type"]>([
+const SUPPORTED_TEXT_CONTENT_TYPES = new Set<ResponseTextContent["type"]>([
   "input_text",
   "output_text",
+]);
+const SUPPORTED_IMAGE_CONTENT_TYPES = new Set<"input_image">(["input_image"]);
+const SUPPORTED_CONTENT_TYPES = new Set<ResponseContentPart["type"]>([
+  ...SUPPORTED_TEXT_CONTENT_TYPES,
+  ...SUPPORTED_IMAGE_CONTENT_TYPES,
 ]);
 
 function normalizeRole(role: unknown, context: string): ChatMessage["role"] {
@@ -51,21 +61,66 @@ function normalizeRole(role: unknown, context: string): ChatMessage["role"] {
   }
 }
 
-function normalizeContentPart(part: unknown, context: string): string {
+function normalizeTextContentPart(part: Record<string, unknown>, context: string): ChatTextContentPart {
+  if (!SUPPORTED_TEXT_CONTENT_TYPES.has(part.type as ResponseTextContent["type"])) {
+    throw new Error(
+      `${context}.type must be one of: input_text, output_text, input_image.`,
+    );
+  }
+  return {
+    type: "text",
+    text: expectString(part.text, `${context}.text`),
+  };
+}
+
+function normalizeImageContentPart(part: Record<string, unknown>, context: string): ChatImageUrlContentPart {
+  // Support both { image_url: "<data-url>" } (Beacon-flavored, per docs)
+  // and { image_url: { url: "<url>" } } (OpenAI-standard Responses API).
+  let url: unknown = part.image_url;
+  let detail: "auto" | "low" | "high" | undefined;
+  if (isRecord(url)) {
+    detail = (url.detail as "auto" | "low" | "high" | undefined) ?? undefined;
+    url = url.url;
+  }
+  if (typeof url !== "string" || url.length === 0) {
+    throw new Error(
+      `${context}.image_url must be a string URL or data URL, or an object with a url field.`,
+    );
+  }
+  if (part.detail !== undefined) {
+    const d = expectString(part.detail, `${context}.detail`);
+    if (d !== "auto" && d !== "low" && d !== "high") {
+      throw new Error(
+        `${context}.detail must be one of: auto, low, high.`,
+      );
+    }
+    detail = d;
+  }
+  return {
+    type: "image_url",
+    image_url: { url, ...(detail !== undefined ? { detail } : {}) },
+  };
+}
+
+function normalizeContentPart(part: unknown, context: string): ChatContentPart {
   if (!isRecord(part)) {
     throw new Error(
-      `${context} must be an object with type and text properties.`,
+      `${context} must be an object with type and content fields.`,
     );
   }
 
   const type = expectString(part.type, `${context}.type`);
-  if (!SUPPORTED_CONTENT_TYPES.has(type as ResponseTextContent["type"])) {
+  if (!SUPPORTED_CONTENT_TYPES.has(type as ResponseContentPart["type"])) {
     throw new Error(
-      `${context}.type must be one of: input_text, output_text.`,
+      `${context}.type must be one of: input_text, output_text, input_image.`,
     );
   }
 
-  return expectString(part.text, `${context}.text`);
+  if (type === "input_image") {
+    return normalizeImageContentPart(part, context);
+  }
+
+  return normalizeTextContentPart(part, context);
 }
 
 function normalizeContent(
@@ -78,13 +133,31 @@ function normalizeContent(
 
   if (!Array.isArray(content)) {
     throw new Error(
-      `${context} must be a string or an array of input_text/output_text objects.`,
+      `${context} must be a string or an array of content objects.`,
     );
   }
 
-  return content
-    .map((part, index) => normalizeContentPart(part, `${context}[${index}]`))
-    .join("\n");
+  const parts = content.map((part, index) =>
+    normalizeContentPart(part, `${context}[${index}]`),
+  );
+
+  // If every part is text, collapse to a single string (preserves existing
+  // behavior for text-only conversations and keeps upstream payloads minimal).
+  const textParts: string[] = [];
+  let hasNonText = false;
+  for (const part of parts) {
+    if (part.type === "text") {
+      textParts.push(part.text);
+    } else {
+      hasNonText = true;
+      break;
+    }
+  }
+  if (!hasNonText) {
+    return textParts.join("\n");
+  }
+
+  return parts;
 }
 
 export function normalizeResponseMessageItem(
@@ -100,10 +173,18 @@ export function normalizeResponseMessageItem(
     throw new Error(`${context}.type must be "message".`);
   }
 
-  return {
-    role: normalizeRole(item.role, `${context}.role`),
-    content: normalizeContent(item.content, `${context}.content`),
-  };
+  const role = normalizeRole(item.role, `${context}.role`);
+  const content = normalizeContent(item.content, `${context}.content`);
+
+  if (role !== "user" && Array.isArray(content)) {
+    // Non-user messages (system/assistant) cannot carry multimodal content;
+    // they are restricted to plain text by both OpenAI and Anthropic APIs.
+    throw new Error(
+      `${context}.content: input_image blocks are only valid in user messages.`,
+    );
+  }
+
+  return { role, content };
 }
 
 function normalizeFunctionCallItem(
