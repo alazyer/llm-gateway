@@ -107,6 +107,26 @@ describe("translateChatCompletionResponse", () => {
       } as never),
     ).toThrowError("choices[0].message must be an object.");
   });
+
+  it("omits usage when the upstream non-streaming response has usage: null", () => {
+    const result = translateChatCompletionResponse({
+      id: "chatcmpl-null-usage",
+      object: "chat.completion",
+      created: 1_710_000_000,
+      model: "gpt-4.1-mini",
+      choices: [
+        {
+          index: 0,
+          finish_reason: "stop",
+          message: { role: "assistant", content: "hi" },
+        },
+      ],
+      usage: null,
+    } as never);
+
+    expect(result.usage).toBeUndefined();
+    expect(result.output_text).toBe("hi");
+  });
 });
 
 describe("createChatCompletionStreamTranslator", () => {
@@ -516,5 +536,49 @@ describe("createChatCompletionStreamTranslator", () => {
     expect(completedEvent.data.response.status).toBe("completed");
     expect(completedEvent.data.response.parallel_tool_calls).toBe(true);
     expect(completedEvent.data.response.tool_choice).toBe("auto");
+  });
+
+  it("tolerates usage: null in intermediate streaming chunks (OpenAI include_usage pattern)", () => {
+    const translator = createChatCompletionStreamTranslator();
+
+    // First chunk: content delta with usage: null
+    const firstBatch = translator.push(
+      'data: {"id":"chatcmpl-null-usage","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"Hi"},"finish_reason":null}],"usage":null}\n\n',
+    );
+    // Second chunk: terminal with real usage
+    const secondBatch = translator.push(
+      'data: {"id":"chatcmpl-null-usage","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":4,"completion_tokens":1,"total_tokens":5}}\n\ndata: [DONE]\n\n',
+    );
+
+    // Should not throw; must emit created + lifecycle events
+    expect(firstBatch.length).toBeGreaterThan(0);
+    const createdEvent = parseSseEvent(firstBatch[0]!);
+    expect(createdEvent.event).toBe("response.created");
+    // in_progress response must not include a usage field (none accumulated yet)
+    expect(createdEvent.data.response.usage).toBeUndefined();
+
+    // Final completed event must carry the usage from the last chunk
+    const completedFrame = secondBatch.find((f) => parseSseEvent(f).event === "response.completed")!;
+    const completedEvent = parseSseEvent(completedFrame);
+    expect(completedEvent.data.response.usage).toEqual({
+      input_tokens: 4,
+      output_tokens: 1,
+      total_tokens: 5,
+    });
+  });
+
+  it("omits usage from the completed response when the terminal chunk has no usage", () => {
+    const translator = createChatCompletionStreamTranslator();
+
+    translator.push(
+      'data: {"id":"chatcmpl-no-usage","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"finish_reason":null}],"usage":null}\n\n',
+    );
+    const terminal = translator.push(
+      'data: {"id":"chatcmpl-no-usage","object":"chat.completion.chunk","created":1710000000,"model":"gpt-4.1-mini","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+    );
+
+    const completedFrame = terminal.find((f) => parseSseEvent(f).event === "response.completed")!;
+    const completedEvent = parseSseEvent(completedFrame);
+    expect(completedEvent.data.response.usage).toBeUndefined();
   });
 });

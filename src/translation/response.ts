@@ -267,7 +267,7 @@ export function translateChatCompletionResponse(
     translated.top_p = normalizedOptions.top_p;
   }
 
-  if (response.usage !== undefined) {
+  if (response.usage !== undefined && response.usage !== null) {
     translated.usage = translateChatCompletionUsage(response.usage);
   }
 

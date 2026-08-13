@@ -361,7 +361,7 @@ export class ChatCompletionStreamTranslator {
       events.push(...this.handleToolCallDelta(toolDelta));
     }
 
-    if (chunk.usage !== undefined) {
+    if (chunk.usage !== undefined && chunk.usage !== null) {
       this.usage = translateChatCompletionUsage(chunk.usage, "chunk.usage");
     }
 
