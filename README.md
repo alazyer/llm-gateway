@@ -1,12 +1,13 @@
 # llm-gateway
 
-`llm-gateway` is a Fastify gateway that lets clients call `/responses`-style, OpenAI `/v1/chat/completions`, or Anthropic `/v1/messages` APIs while the upstream model provider only supports `/chat/completions`.
+`llm-gateway` is a Fastify gateway that lets clients call `/responses`-style, OpenAI `/v1/chat/completions`, or Anthropic `/v1/messages` APIs while the upstream model provider only supports `/chat/completions`. It also exposes model discovery, a sessioned web chat API, and optional Copilot proxy/admin APIs.
 
 ## What it does
 
 - Accepts `POST /responses` and `POST /v1/responses`
 - Accepts `POST /v1/chat/completions` for OpenAI-compatible clients
 - Accepts `POST /v1/messages` for Anthropic-compatible clients such as Claude Code
+- Accepts `POST /v1/messages/count_tokens` for Anthropic token counting
 - Exposes `GET /models`, `GET /v1/models`, and per-model detail endpoints for metadata discovery
 - Translates `/responses` input into `/chat/completions` messages
 - Translates Anthropic `/v1/messages` requests into `/chat/completions`, including tool definitions and tool result messages
@@ -15,10 +16,13 @@
 - Translates Anthropic JSON and streaming message responses back into Claude-compatible message/event shapes
 - Exposes `GET /healthz` for basic runtime checks
 - Advertises compatibility metadata such as `personality`, `model_messages`, and `base_instructions` on model records
+- Exposes `/api/ai-chat/*` endpoints for the web chat UI
+- Exposes `/api/proxy-token`, `/api/channels`, and `/ws/copilot-proxy` when Copilot proxy support is enabled
+- Exposes `/admin/*` model, chain, status, and workspace management endpoints
 
 ## Configuration
 
-The gateway uses a YAML model catalog as the only model-configuration path.
+The gateway uses a YAML model catalog as the primary model-configuration path. On server startup, if `models` or `model_chains` are omitted from the YAML file, the bootstrap path can hydrate them from the persisted SQLite database.
 
 Copy `.env.example` to `.env`, copy `gateway.config.example.yaml` to `gateway.config.yaml`, then set:
 
@@ -36,10 +40,30 @@ Each YAML entry supports:
 - `upstream_model` - optional upstream model name to send to `/chat/completions`
 - `base_url` - upstream provider base URL
 - `api_key_env` - environment variable name holding the secret
+- `api_key` is not supported inline; secrets must come from `api_key_env`
 - `owned_by` - owner string returned in model discovery
 - `supports_tools` - optional, defaults to `true`; reject tool requests when `false`
 - `supports_streaming` - optional, defaults to `true`; reject streaming requests when `false`
 - `unknown_field_mode` - optional, one of `warn` or `enforce` (defaults to `warn`) for `/responses` top-level unknown fields
+- `unknown_field_window_requests` - optional, rolling request window used before unknown-field counters reset (defaults to `100`)
+
+The top-level YAML gateway settings also support:
+
+- `default_model` - default model used when requests omit `model`
+- `request_timeout_ms` - upstream request timeout in milliseconds (default `30000`)
+- `max_retries` - retry attempts for transient upstream failures (default `0`)
+- `max_body_size_kb` - request body limit in kilobytes (default `1024`)
+- `gateway_auth_token_env` - environment variable name for the gateway auth token
+- `health_probe_enabled` - when `true`, `/healthz` probes upstream `/models`
+- `cors_origin` - allowed browser origin string, `*`, or string array
+- `workspace_enabled` - enables workspace middleware and `/admin/workspaces/*`
+- `copilot_proxy_enabled` - enables `/api/proxy-token`, `/api/channels`, and `/ws/copilot-proxy`
+- `copilot_proxy_require_token_auth` - whether `/ws/copilot-proxy` requires a token query param
+- `copilot_proxy_token_ttl_seconds` - Copilot proxy token lifetime
+- `copilot_proxy_heartbeat_interval_ms` - Copilot proxy heartbeat interval
+- `copilot_proxy_heartbeat_timeout_ms` - Copilot proxy heartbeat timeout
+- `copilot_proxy_max_inflight_per_connection` - max in-flight proxied requests per connection
+- `copilot_proxy_allowed_prefixes` - model ID prefixes allowed for Copilot proxy registrations
 
 The gateway uses `default_model` when a request omits `model`.
 
@@ -81,22 +105,29 @@ Before promoting a model to `unknown_field_mode: enforce`, require all of:
 ```bash
 cp .env.example .env
 cp gateway.config.example.yaml gateway.config.yaml
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Build and run the compiled server:
 
 ```bash
-npm run build
-npm start
+pnpm build
+pnpm start
 ```
+
+## Runtime APIs
+
+- **Web AI Chat:** `POST /api/ai-chat/messages`, `GET /api/ai-chat/sessions`, `GET /api/ai-chat/sessions/:sessionId/messages`
+- **Admin:** `GET /admin/status`, `GET /admin/database`, `GET /admin/models`, `POST /admin/models`, `POST /admin/models/:name/activate`, `POST /admin/models/:name/deactivate`, `GET /admin/chains`, `POST /admin/chains`
+- **Workspaces:** when `workspace_enabled: true`, `GET/POST /admin/workspaces` plus per-workspace model, alias, token, member, and usage endpoints
+- **Copilot proxy:** when `copilot_proxy_enabled: true`, `POST /api/proxy-token`, `GET /api/channels`, and `GET /ws/copilot-proxy`
 
 ## Web AI Chat validation (admin console)
 
 The Nuxt admin console includes a **Chat** page for quick model availability validation.
 
-1. Start the gateway (`npm run dev` or `npm start`).
+1. Start the gateway (`pnpm dev` or `pnpm start`).
 2. Start the web app:
 
 ```bash
