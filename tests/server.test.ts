@@ -105,7 +105,7 @@ describe("createApp", () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({ ok: true });
+      expect(response.json()).toEqual({ ok: true, models: 2, configured: true });
     } finally {
       await app.close();
     }
@@ -318,9 +318,9 @@ describe("createApp", () => {
         },
       });
 
-      expect(response.statusCode).toBe(400);
+      expect(response.statusCode).toBe(404);
       expect(response.json()).toEqual({
-        error: "Model metadata for `unknown-model` is not configured.",
+        error: "Model `unknown-model` is not configured.",
       });
       expect(fetchMock).not.toHaveBeenCalled();
     } finally {
@@ -759,10 +759,10 @@ describe("createApp", () => {
         },
       });
 
-      expect(response.statusCode).toBe(400);
+      expect(response.statusCode).toBe(404);
       expect(response.json()).toEqual({
         error: {
-          message: "Model metadata for `unknown-model` is not configured.",
+          message: "Model `unknown-model` is not configured.",
           type: "invalid_request_error",
         },
       });

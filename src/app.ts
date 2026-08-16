@@ -42,7 +42,6 @@ export function createApp(options: CreateAppOptions) {
     workspace: options.config.workspace ?? { enabled: false },
     modelChains: options.config.modelChains ?? [],
   };
-  const includeHealthDetails = options.config.maxBodySizeKb !== undefined;
   const copilotProxyConfig = getCopilotProxyConfig(config);
   const copilotProxyTokenStore = new CopilotProxyTokenStore({
     tokenTtlSeconds: copilotProxyConfig.tokenTtlSeconds,
@@ -92,22 +91,13 @@ export function createApp(options: CreateAppOptions) {
   app.get("/healthz", async (request, reply) => {
     app.log.debug("Serving health check response.");
 
-    if (config.models.length === 0) {
-      return reply.code(503).send({
-        ok: false,
-        error: "No models configured.",
-      });
-    }
-
-    const healthResponse: { ok: boolean; models?: number; upstream?: string } = {
+    const healthResponse: { ok: boolean; models: number; configured: boolean; upstream?: string } = {
       ok: true,
+      models: config.models.length,
+      configured: config.models.length > 0,
     };
 
-    if (includeHealthDetails) {
-      healthResponse.models = config.models.length;
-    }
-
-    if (config.healthProbeEnabled) {
+    if (config.healthProbeEnabled && config.models.length > 0) {
       try {
         const probeUrl = `${config.upstreamBaseUrl}/models`;
         const fetchToUse = options.fetchFn ?? fetch;

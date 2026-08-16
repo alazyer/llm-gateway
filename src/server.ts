@@ -5,9 +5,9 @@ import { allMigrations } from "./db/migrations/all.js";
 import { runMigrations } from "./db/migrations/index.js";
 import { applyDatabaseFallbackConfig } from "./runtime-config.js";
 
-const { config: loadedConfig, sourcePresence } = loadConfigForRuntime();
 const db = openDatabase();
 runMigrations(db, allMigrations);
+const { config: loadedConfig, sourcePresence } = loadConfigForRuntime();
 const config = applyDatabaseFallbackConfig(loadedConfig, sourcePresence, process.env);
 const app = createApp({ config });
 

@@ -160,7 +160,7 @@ describe("Chain handler integration", () => {
 
       expect(response.statusCode).toBe(404);
       expect(response.json()).toEqual({
-        error: "Chain `nonexistent` is not configured.",
+        error: "Model `chain-nonexistent` is not configured.",
       });
     } finally {
       await app.close();

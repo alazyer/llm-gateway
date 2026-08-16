@@ -22,17 +22,17 @@
 
 ## Configuration
 
-The gateway uses a YAML model catalog as the primary model-configuration path. On server startup, if `models` or `model_chains` are omitted from the YAML file, the bootstrap path can hydrate them from the persisted SQLite database.
+The gateway uses the SQLite database as the runtime source of truth for models, chains, and gateway settings. `GATEWAY_CONFIG_PATH` is accepted for YAML seeding and local tooling, but it is ignored by runtime startup.
 
 Copy `.env.example` to `.env`, copy `gateway.config.example.yaml` to `gateway.config.yaml`, then set:
 
 - `HOST` - bind host, defaults to `0.0.0.0`
 - `PORT` - bind port, defaults to `3000`
 - `LOG_LEVEL` - Fastify/Pino log level, one of `trace`, `debug`, `info`, `warn`, `error`, `fatal`, `silent`
-- `GATEWAY_CONFIG_PATH` - path to your YAML model catalog
+- `GATEWAY_CONFIG_PATH` - optional YAML catalog path for seeding/tooling only; runtime startup ignores it
 - provider secret env vars referenced by `api_key_env` in the YAML file
 
-Keep actual secrets in your shell or `.env`, not in tracked YAML files. The recommended `gateway.config.yaml` file is local-only and gitignored.
+Provision models, chains, and gateway settings through the admin APIs or direct DB tooling after startup. Keep actual secrets in your shell or `.env`, not in tracked YAML files. The recommended `gateway.config.yaml` file is local-only and gitignored.
 
 Each YAML entry supports:
 
@@ -171,7 +171,9 @@ Example response:
 
 ```json
 {
-  "ok": true
+  "ok": true,
+  "models": 1,
+  "configured": true
 }
 ```
 
@@ -257,7 +259,7 @@ The gateway emits these event names for streaming calls:
 
 ## Claude Code
 
-Claude Code can target the gateway through `ANTHROPIC_BASE_URL` as long as the YAML catalog exposes a Claude-facing public model name such as `claude-sonnet-4-5`.
+Claude Code can target the gateway through `ANTHROPIC_BASE_URL` as long as the runtime catalog exposes a Claude-facing public model name such as `claude-sonnet-4-5`.
 
 ```bash
 HTTP_PROXY= \

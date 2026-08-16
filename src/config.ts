@@ -15,7 +15,7 @@ const envSchema = z.object({
   LOG_LEVEL: z
     .enum(["trace", "debug", "info", "warn", "error", "fatal", "silent"])
     .default("info"),
-  GATEWAY_CONFIG_PATH: z.string().trim().min(1),
+  GATEWAY_CONFIG_PATH: z.string().trim().min(1).optional(),
 });
 
 const yamlModelSchema = z
@@ -91,7 +91,7 @@ export interface GatewayModelConfig {
   name: string;
   upstreamModel: string;
   baseUrl: string;
-  apiKey: string;
+  apiKey: string | undefined;
   apiKeyEnv: string;
   ownedBy: string;
   created: number;
@@ -402,8 +402,52 @@ export function loadConfigForRuntime(
   env: NodeJS.ProcessEnv = process.env,
 ): RuntimeConfigLoadResult {
   const parsed = envSchema.parse(env);
-  const configSource = loadYamlConfig(parsed.GATEWAY_CONFIG_PATH, env);
+  const config: AppConfig = {
+    host: parsed.HOST,
+    port: parsed.PORT,
+    logLevel: parsed.LOG_LEVEL,
+    upstreamBaseUrl: "",
+    requestTimeoutMs: 30000,
+    maxRetries: 0,
+    maxBodySizeKb: 1024,
+    healthProbeEnabled: false,
+    workspace: { enabled: false },
+    copilotProxy: DEFAULT_COPILOT_PROXY_CONFIG,
+    models: [],
+    modelChains: [],
+  };
 
+  return {
+    config,
+    sourcePresence: {
+      missingModels: true,
+      missingModelChains: true,
+    },
+  };
+}
+
+function validateDefaultModel(config: AppConfig): void {
+  if (!config.defaultModel) {
+    return;
+  }
+
+  const modelExists = config.models.some((model) => model.name === config.defaultModel);
+  const chainExists = config.modelChains.some((chain) => `chain-${chain.name}` === config.defaultModel);
+
+  if (!modelExists && !chainExists) {
+    throw new Error(
+      `default_model ${config.defaultModel} is not present in the configured model catalog or model chains.`,
+    );
+  }
+}
+
+export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
+  const parsed = envSchema.parse(env);
+  if (!parsed.GATEWAY_CONFIG_PATH) {
+    throw new Error("GATEWAY_CONFIG_PATH is required when loading YAML config.");
+  }
+
+  const configSource = loadYamlConfig(parsed.GATEWAY_CONFIG_PATH, env);
   const config: AppConfig = {
     host: parsed.HOST,
     port: parsed.PORT,
@@ -433,36 +477,6 @@ export function loadConfigForRuntime(
 
   if (configSource.corsOrigin) {
     config.corsOrigin = configSource.corsOrigin;
-  }
-
-  return {
-    config,
-    sourcePresence: configSource.sourcePresence,
-  };
-}
-
-function validateDefaultModel(config: AppConfig): void {
-  if (!config.defaultModel) {
-    return;
-  }
-
-  const modelExists = config.models.some((model) => model.name === config.defaultModel);
-  const chainExists = config.modelChains.some((chain) => `chain-${chain.name}` === config.defaultModel);
-
-  if (!modelExists && !chainExists) {
-    throw new Error(
-      `default_model ${config.defaultModel} is not present in the configured model catalog or model chains.`,
-    );
-  }
-}
-
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
-  const { config, sourcePresence } = loadConfigForRuntime(env);
-
-  if (sourcePresence.missingModels) {
-    throw new Error(
-      "Gateway config is missing required `models` section. Startup fallback to database is only available in the server bootstrap path.",
-    );
   }
 
   if (config.models.length === 0) {

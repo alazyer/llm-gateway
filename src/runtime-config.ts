@@ -2,22 +2,67 @@ import type { AppConfig, ConfigSourcePresence, GatewayModelConfig } from "./conf
 import {
   getAllChains,
   getChainModels,
+  getGatewayConfig,
   getModelsFiltered,
+  insertGatewayConfig,
 } from "./db/repository.js";
+import type { ChainModelRow, GatewayConfigRow, ModelRow } from "./db/types.js";
 
 function fromSqlBool(value: number): boolean {
   return value === 1;
 }
 
-function mapDbModelToGatewayModel(row: import("./db/types.js").ModelRow, env: NodeJS.ProcessEnv): GatewayModelConfig {
+function createDefaultGatewayConfigRow(): GatewayConfigRow {
+  return {
+    id: 1,
+    default_model: null,
+    request_timeout_ms: 30000,
+    max_retries: 0,
+    max_body_size_kb: 1024,
+    gateway_auth_token_env: null,
+    health_probe_enabled: 0,
+    cors_origin: null,
+    copilot_proxy_enabled: 0,
+    copilot_proxy_require_token_auth: 1,
+    copilot_proxy_token_ttl_seconds: 86400,
+    copilot_proxy_heartbeat_interval_ms: 30000,
+    copilot_proxy_heartbeat_timeout_ms: 10000,
+    copilot_proxy_max_inflight_per_connection: 4,
+    copilot_proxy_allowed_prefixes: "[\"copilot-\"]",
+  };
+}
+
+function ensureGatewayConfigRow(): GatewayConfigRow {
+  const existing = getGatewayConfig();
+  if (existing) {
+    return existing;
+  }
+
+  const defaults = createDefaultGatewayConfigRow();
+  insertGatewayConfig(defaults);
+  return defaults;
+}
+
+function parseCorsOrigin(value: string | null): string | string[] | undefined {
+  if (value === null) {
+    return undefined;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "string")) {
+      return parsed;
+    }
+  } catch {
+    // Keep the stored string when it is not JSON.
+  }
+
+  return value;
+}
+
+function mapDbModelToGatewayModel(row: ModelRow, env: NodeJS.ProcessEnv): GatewayModelConfig {
   const apiKeyEnv = row.api_key_env.trim();
   const apiKey = apiKeyEnv ? env[apiKeyEnv] : undefined;
-  if (!apiKey) {
-    const detail = apiKeyEnv.length > 0 ? `environment variable ${apiKeyEnv}` : "an empty api_key_env value";
-    throw new Error(
-      `Missing API key for model ${row.name} from ${detail} while loading fallback config from database.`,
-    );
-  }
 
   return {
     name: row.name,
@@ -37,94 +82,120 @@ function mapDbModelToGatewayModel(row: import("./db/types.js").ModelRow, env: No
   };
 }
 
-function validateDefaultModel(config: AppConfig): void {
-  if (!config.defaultModel) {
-    return;
-  }
+function createBrokenModelConfig(modelName: string): GatewayModelConfig {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    name: modelName,
+    upstreamModel: modelName,
+    baseUrl: "",
+    apiKey: undefined,
+    apiKeyEnv: "",
+    ownedBy: "llm-gateway",
+    created: now,
+    supportsTools: true,
+    supportsStreaming: true,
+    unknownFieldMode: "warn",
+    unknownFieldWindowRequests: 100,
+    status: "inactive",
+    statusReason: "Missing model row in database.",
+    statusChangedAt: now,
+  };
+}
 
-  const modelExists = config.models.some((model) => model.name === config.defaultModel);
-  const chainExists = config.modelChains.some((chain) => `chain-${chain.name}` === config.defaultModel);
+function mapChainModels(
+  rows: ChainModelRow[],
+  modelByName: ReadonlyMap<string, GatewayModelConfig>,
+  chainTimeoutMs: number,
+  chainMaxRetries: number,
+): Array<{
+  name: string;
+  modelConfig: GatewayModelConfig;
+  timeoutMs: number;
+  maxRetries: number;
+}> {
+  return rows.map((entry) => {
+    const modelConfig = modelByName.get(entry.model_name) ?? createBrokenModelConfig(entry.model_name);
 
-  if (!modelExists && !chainExists) {
-    throw new Error(
-      `default_model ${config.defaultModel} is not present in the effective model catalog or model chains.`,
-    );
-  }
+    return {
+      name: entry.model_name,
+      modelConfig,
+      timeoutMs: entry.timeout_ms ?? chainTimeoutMs,
+      maxRetries: entry.max_retries ?? chainMaxRetries,
+    };
+  });
 }
 
 export function applyDatabaseFallbackConfig(
   baseConfig: AppConfig,
-  sourcePresence: ConfigSourcePresence,
+  _sourcePresence: ConfigSourcePresence,
   env: NodeJS.ProcessEnv = process.env,
 ): AppConfig {
-  const nextConfig: AppConfig = {
+  const gatewayConfig = ensureGatewayConfigRow();
+  const models = getModelsFiltered({ source: "static" }).map((row) => mapDbModelToGatewayModel(row, env));
+  const modelByName = new Map(models.map((model) => [model.name, model]));
+
+  const modelChains = getAllChains().map((chainRow) => {
+    const chainModels = mapChainModels(
+      getChainModels(chainRow.name).sort((left, right) => left.position - right.position),
+      modelByName,
+      chainRow.timeout_ms,
+      chainRow.max_retries,
+    );
+    const activeModels = chainModels.filter((entry) => entry.modelConfig.status === "active").length;
+
+    return {
+      name: chainRow.name,
+      models: chainModels,
+      timeoutMs: chainRow.timeout_ms,
+      maxRetries: chainRow.max_retries,
+      ...(chainRow.chain_timeout_ms !== null ? { chainTimeoutMs: chainRow.chain_timeout_ms } : {}),
+      status: chainRow.status,
+      statusReason: chainRow.status_reason,
+      statusChangedAt: chainRow.status_changed_at,
+      activeModels,
+      totalModels: chainModels.length,
+    };
+  });
+
+  const config: AppConfig = {
     ...baseConfig,
-    models: [...baseConfig.models],
-    modelChains: [...baseConfig.modelChains],
+    upstreamBaseUrl: models[0]?.baseUrl ?? baseConfig.upstreamBaseUrl,
+    requestTimeoutMs: gatewayConfig.request_timeout_ms,
+    maxRetries: gatewayConfig.max_retries,
+    maxBodySizeKb: gatewayConfig.max_body_size_kb,
+    healthProbeEnabled: gatewayConfig.health_probe_enabled === 1,
+    copilotProxy: {
+      enabled: gatewayConfig.copilot_proxy_enabled === 1,
+      requireTokenAuth: gatewayConfig.copilot_proxy_require_token_auth === 1,
+      tokenTtlSeconds: gatewayConfig.copilot_proxy_token_ttl_seconds,
+      heartbeatIntervalMs: gatewayConfig.copilot_proxy_heartbeat_interval_ms,
+      heartbeatTimeoutMs: gatewayConfig.copilot_proxy_heartbeat_timeout_ms,
+      maxInflightPerConnection: gatewayConfig.copilot_proxy_max_inflight_per_connection,
+      allowedPrefixes: JSON.parse(gatewayConfig.copilot_proxy_allowed_prefixes) as string[],
+    },
+    models,
+    modelChains,
   };
 
-  if (sourcePresence.missingModels) {
-    const staticRows = getModelsFiltered({ source: "static" });
-    const dbModels = staticRows.map((row) => mapDbModelToGatewayModel(row, env));
+  if (gatewayConfig.default_model !== null) {
+    config.defaultModel = gatewayConfig.default_model;
+  }
 
-    if (dbModels.length === 0) {
-      throw new Error(
-        "Gateway config is missing `models` and database fallback found no persisted static models.",
-      );
+  if (gatewayConfig.gateway_auth_token_env !== null) {
+    config.gatewayAuthTokenEnv = gatewayConfig.gateway_auth_token_env;
+  }
+
+  const corsOrigin = parseCorsOrigin(gatewayConfig.cors_origin);
+  if (corsOrigin !== undefined) {
+    config.corsOrigin = corsOrigin;
+  }
+
+  if (gatewayConfig.gateway_auth_token_env) {
+    const token = env[gatewayConfig.gateway_auth_token_env];
+    if (token) {
+      config.gatewayAuthToken = token;
     }
-
-    nextConfig.models = dbModels;
-    nextConfig.upstreamBaseUrl = dbModels[0]!.baseUrl;
-
-    console.info(
-      `[startup] Config file missing models; loaded ${dbModels.length} static model(s) from database fallback.`,
-    );
   }
 
-  if (sourcePresence.missingModelChains) {
-    const modelByName = new Map(nextConfig.models.map((model) => [model.name, model]));
-
-    nextConfig.modelChains = getAllChains().map((chainRow) => {
-      const chainModels = getChainModels(chainRow.name)
-        .sort((left, right) => left.position - right.position)
-        .map((entry) => {
-          const modelConfig = modelByName.get(entry.model_name);
-          if (!modelConfig) {
-            throw new Error(
-              `Chain \"${chainRow.name}\" references model \"${entry.model_name}\" that is missing from the effective model catalog.`,
-            );
-          }
-
-          return {
-            name: entry.model_name,
-            modelConfig,
-            timeoutMs: entry.timeout_ms ?? chainRow.timeout_ms,
-            maxRetries: entry.max_retries ?? chainRow.max_retries,
-          };
-        });
-
-      const activeModels = chainModels.filter((entry) => entry.modelConfig.status === "active").length;
-
-      return {
-        name: chainRow.name,
-        models: chainModels,
-        timeoutMs: chainRow.timeout_ms,
-        maxRetries: chainRow.max_retries,
-        ...(chainRow.chain_timeout_ms !== null ? { chainTimeoutMs: chainRow.chain_timeout_ms } : {}),
-        status: chainRow.status,
-        statusReason: chainRow.status_reason,
-        statusChangedAt: chainRow.status_changed_at,
-        activeModels,
-        totalModels: chainModels.length,
-      };
-    });
-
-    console.info(
-      `[startup] Config file missing model_chains; loaded ${nextConfig.modelChains.length} chain(s) from database fallback.`,
-    );
-  }
-
-  validateDefaultModel(nextConfig);
-
-  return nextConfig;
+  return config;
 }

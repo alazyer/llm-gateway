@@ -29,15 +29,13 @@ function resolveModel(
   const normalizedModel = normalizeOptionalString(requestedModel);
 
   if (normalizedModel) {
-    // Chain resolution MUST happen BEFORE plain model lookup and Copilot
-    // proxy lookup to prevent chain-copilot-* from being misrouted.
     if (normalizedModel.startsWith("chain-")) {
       const chainName = normalizedModel.slice("chain-".length);
       const chain = config.modelChains?.find((c) => c.name === chainName);
       if (chain) {
         return { type: "chain", chain };
       }
-      throw new RouteError(400, `Chain \`${chainName}\` is not configured.`);
+      throw new RouteError(404, `Chain \`${chainName}\` is not configured.`);
     }
 
     const configured = config.models.find((model) => model.name === normalizedModel);
@@ -45,17 +43,17 @@ function resolveModel(
       return configured;
     }
 
-    throw new RouteError(400, `Model metadata for \`${normalizedModel}\` is not configured.`);
+    throw new RouteError(404, `Model \`${normalizedModel}\` is not configured.`);
   }
 
   if (config.defaultModel) {
-    // Support chain-<name> as default_model
     if (config.defaultModel.startsWith("chain-")) {
       const chainName = config.defaultModel.slice("chain-".length);
       const chain = config.modelChains?.find((c) => c.name === chainName);
       if (chain) {
         return { type: "chain", chain };
       }
+      throw new RouteError(404, `Chain \`${chainName}\` is not configured.`);
     }
 
     const configuredDefault = config.models.find(
@@ -71,8 +69,8 @@ function resolveModel(
   }
 
   throw new RouteError(
-    400,
-    "Request body must include a model or the gateway must define a single/default model.",
+    404,
+    "No model is configured for this request.",
   );
 }
 
@@ -177,16 +175,16 @@ describe("resolveModel — chain resolution", () => {
     }
   });
 
-  // --- Unknown chain identifier → 400 ---
+  // --- Unknown chain identifier → 404 ---
 
-  it("throws RouteError 400 when chain-<name> is not configured", () => {
+  it("throws RouteError 404 when chain-<name> is not configured", () => {
     const config = makeConfig(); // no chains
 
     expect(() => resolveModel(config, "chain-nonexistent")).toThrow(RouteError);
     try {
       resolveModel(config, "chain-nonexistent");
     } catch (error) {
-      expect((error as RouteError).statusCode).toBe(400);
+      expect((error as RouteError).statusCode).toBe(404);
       expect((error as RouteError).message).toContain("not configured");
     }
   });
@@ -276,15 +274,11 @@ describe("resolveModel — chain resolution", () => {
     expect((result as GatewayModelConfig).name).toBe("gpt-5");
   });
 
-  // --- default_model is chain-<name> but chain doesn't exist → fallback to plain model ---
+  // --- default_model is chain-<name> but chain doesn't exist → 404 ---
 
-  it("falls back to plain model lookup when default_model starts with chain- but no matching chain exists", () => {
-    // If defaultModel is "chain-foo" but no chain "foo" exists, it should try
-    // the plain model path (which will also fail, producing the existing error)
+  it("returns 404 when default_model starts with chain- but no matching chain exists", () => {
     const config = makeConfig({ defaultModel: "chain-nonexistent" });
 
-    // This should NOT throw from chain resolution — it should fall through to
-    // the plain model path and throw the existing "not configured" error
     expect(() => resolveModel(config, undefined)).toThrow(RouteError);
   });
 
@@ -301,27 +295,27 @@ describe("resolveModel — chain resolution", () => {
 
   // --- Error when no model, no default, multiple models ---
 
-  it("throws RouteError 400 when no model specified, no default, multiple models", () => {
+  it("throws RouteError 404 when no model specified, no default, multiple models", () => {
     const config = makeConfig(); // two models, no default
 
     expect(() => resolveModel(config, undefined)).toThrow(RouteError);
     try {
       resolveModel(config, undefined);
     } catch (error) {
-      expect((error as RouteError).statusCode).toBe(400);
+      expect((error as RouteError).statusCode).toBe(404);
     }
   });
 
   // --- Error for unknown plain model name unchanged ---
 
-  it("throws RouteError 400 for unknown plain model name", () => {
+  it("throws RouteError 404 for unknown plain model name", () => {
     const config = makeConfig();
 
     expect(() => resolveModel(config, "unknown-model")).toThrow(RouteError);
     try {
       resolveModel(config, "unknown-model");
     } catch (error) {
-      expect((error as RouteError).statusCode).toBe(400);
+      expect((error as RouteError).statusCode).toBe(404);
       expect((error as RouteError).message).toContain("not configured");
     }
   });

@@ -46,7 +46,7 @@ describe("Enhanced health check", () => {
         });
 
         expect(response.statusCode).toBe(200);
-        expect(response.json()).toEqual({ ok: true, models: 1 });
+        expect(response.json()).toEqual({ ok: true, models: 1, configured: true });
       } finally {
         await app.close();
       }
@@ -85,15 +85,15 @@ describe("Enhanced health check", () => {
         });
 
         expect(response.statusCode).toBe(200);
-        expect(response.json()).toEqual({ ok: true, models: 2 });
+        expect(response.json()).toEqual({ ok: true, models: 2, configured: true });
       } finally {
         await app.close();
       }
     });
   });
 
-  describe("zero models returns 503", () => {
-    it("returns {ok: false, error} with 503 when no models are configured", async () => {
+  describe("zero models returns 200", () => {
+    it("returns {ok: true, models: 0, configured: false} when no models are configured", async () => {
       const emptyConfig: AppConfig = {
         ...baseConfig,
         models: [],
@@ -107,10 +107,11 @@ describe("Enhanced health check", () => {
           url: "/healthz",
         });
 
-        expect(response.statusCode).toBe(503);
+        expect(response.statusCode).toBe(200);
         expect(response.json()).toEqual({
-          ok: false,
-          error: "No models configured.",
+          ok: true,
+          models: 0,
+          configured: false,
         });
       } finally {
         await app.close();
@@ -158,6 +159,7 @@ describe("Enhanced health check", () => {
         expect(response.json()).toEqual({
           ok: true,
           models: 1,
+          configured: true,
           upstream: "reachable",
         });
       } finally {
@@ -238,7 +240,7 @@ describe("Enhanced health check", () => {
         });
 
         expect(response.statusCode).toBe(200);
-        expect(response.json()).toEqual({ ok: true, models: 1 });
+        expect(response.json()).toEqual({ ok: true, models: 1, configured: true });
         // fetch should NOT have been called for probe
         expect(fetchMock).not.toHaveBeenCalled();
       } finally {

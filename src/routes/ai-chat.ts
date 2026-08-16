@@ -651,10 +651,19 @@ function sendRouteError(reply: FastifyReply, error: AiChatRouteError, requestId:
   });
 }
 
+function ensureModelRuntimeReady(
+  model: GatewayModelConfig,
+): asserts model is GatewayModelConfig & { apiKey: string } {
+  if (!model.baseUrl || !model.apiKey) {
+    throw new AiChatRouteError(500, "UPSTREAM_UNAVAILABLE", `Model \`${model.name}\` is missing runtime configuration.`);
+  }
+}
+
 export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app, options) => {
   const clientCache = new Map<string, ChatCompletionsTransport>();
 
   const getClient = (model: GatewayModelConfig): ChatCompletionsTransport => {
+    ensureModelRuntimeReady(model);
     if (options.client) {
       return options.client;
     }
@@ -813,6 +822,8 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       { event: "ai_chat_send", requestId, sessionId, userId, stream: parsed.stream },
       "Web AI Chat request accepted.",
     );
+
+    ensureModelRuntimeReady(routedModel.model);
 
     if (!parsed.stream) {
       const requestStartedAt = nowMillis();
