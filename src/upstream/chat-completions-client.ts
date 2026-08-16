@@ -77,10 +77,11 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
 
   public async createCompletion(
     request: ChatCompletionRequest,
-    _requestId?: string,
+    requestId?: string,
     options?: PerRequestOptions,
   ): Promise<ChatCompletionResponse> {
     const requestOptions = this.resolveRequestOptions(options);
+    this.applyRequestId(requestOptions, requestId);
     try {
       const response = await this.client.chat.completions.create(
         request as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming,
@@ -95,7 +96,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
 
   public async createCompletionStream(
     request: ChatCompletionRequest,
-    _requestId?: string,
+    requestId?: string,
     options?: PerRequestOptions,
   ): Promise<ReadableStream<Uint8Array>> {
     const streamingRequest: ChatCompletionRequest = {
@@ -112,6 +113,7 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
     );
 
     const requestOptions = this.resolveRequestOptions(options);
+    this.applyRequestId(requestOptions, requestId);
     try {
       const stream = await this.client.chat.completions.create(
         streamingRequest as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
@@ -128,8 +130,12 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
    * Build the SDK per-call `RequestOptions`, resolving each field as:
    * per-request override → instance default → SDK default (omitted).
    */
-  private resolveRequestOptions(options?: PerRequestOptions): { maxRetries?: number; timeout?: number } {
-    const resolved: { maxRetries?: number; timeout?: number } = {};
+  private resolveRequestOptions(options?: PerRequestOptions): {
+    maxRetries?: number;
+    timeout?: number;
+    headers?: Record<string, string>;
+  } {
+    const resolved: { maxRetries?: number; timeout?: number; headers?: Record<string, string> } = {};
     const maxRetries = options?.maxRetries ?? this.instanceMaxRetries;
     if (maxRetries !== undefined) {
       resolved.maxRetries = maxRetries;
@@ -139,6 +145,21 @@ export class ChatCompletionsClient implements ChatCompletionsTransport {
       resolved.timeout = timeoutMs;
     }
     return resolved;
+  }
+
+  /**
+   * Attach the gateway request id as an `X-Request-ID` header on the
+   * upstream call so it can be correlated end-to-end. Mutates the resolved
+   * options in place; a no-op when no request id is available.
+   */
+  private applyRequestId(
+    requestOptions: { headers?: Record<string, string> },
+    requestId?: string,
+  ): void {
+    if (!requestId) {
+      return;
+    }
+    requestOptions.headers = { ...(requestOptions.headers ?? {}), "X-Request-ID": requestId };
   }
 
   private toUpstreamError(
