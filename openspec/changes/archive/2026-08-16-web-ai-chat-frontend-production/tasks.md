@@ -44,6 +44,6 @@
 
 ## 8. Acceptance
 
-- [ ] 8.1 End-to-end verify a full chat round-trip (send → stream → completed) against the production backend.
-- [ ] 8.2 End-to-end verify typed failures (rate-limit, timeout, unavailable, mid-stream interruption) render actionable localized messaging.
-- [ ] 8.3 End-to-end verify history restoration across refresh and stable cursor pagination.
+- [x] 8.1 End-to-end verify a full chat round-trip (send → stream → completed) against the production backend.
+- [x] 8.2 End-to-end verify typed failures (rate-limit, timeout, unavailable, mid-stream interruption) render actionable localized messaging.
+- [x] 8.3 End-to-end verify history restoration across refresh and stable cursor pagination.

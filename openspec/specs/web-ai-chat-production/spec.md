@@ -23,17 +23,24 @@ All Web AI Chat routes and actions SHALL require authenticated access and SHALL 
 
 ### Requirement: Web AI Chat SHALL support production prompt execution in stream and non-stream modes
 
-Prompt submission SHALL route through internal LLM Gateway model routing and return either non-stream completion or SSE event stream per request mode.
+Prompt submission SHALL route through internal LLM Gateway model routing and return either non-stream completion or SSE event stream per request mode. The message request SHALL accept an optional `model` field, and the routed model SHALL be resolved per request (not fixed at startup).
 
 #### Scenario: Non-stream prompt success
 - **WHEN** an authenticated user submits a valid prompt with `stream=false`
 - **THEN** response SHALL include `sessionId`, `messageId`, `assistantMessage`, `model`, `usage`, and `requestId`
 - **AND** both user and assistant messages SHALL be persisted
+- **AND** the assistant message SHALL record the model actually routed to
 
 #### Scenario: Stream prompt success
 - **WHEN** an authenticated user submits a valid prompt with `stream=true`
 - **THEN** SSE events SHALL be emitted in order: `started`, `delta*`, `completed`
 - **AND** final assistant message metadata SHALL be persisted on completion
+
+#### Scenario: Message request accepts an optional model field
+- **WHEN** an authenticated user submits a message with `model: M` in the request body
+- **THEN** the backend SHALL resolve the routable model per the session/new-session precedence
+- **AND** SHALL route to the resolved model
+- **AND** the request SHALL NOT be rejected solely because a `model` field is present
 
 ### Requirement: Web AI Chat SHALL enforce rate limiting and bounded retry
 
@@ -52,7 +59,7 @@ The system SHALL apply per-user rate limiting and SHALL retry only transient ups
 
 ### Requirement: Web AI Chat SHALL persist session history with deterministic retrieval
 
-The system SHALL persist chat sessions and messages and SHALL provide stable cursor-based history retrieval.
+The system SHALL persist chat sessions and messages and SHALL provide stable cursor-based history retrieval. The session list response SHALL include each session's `title` and `model`.
 
 #### Scenario: Session history restores after refresh
 - **GIVEN** a session has prior messages
@@ -64,6 +71,11 @@ The system SHALL persist chat sessions and messages and SHALL provide stable cur
 - **GIVEN** history spans multiple pages
 - **WHEN** client follows returned cursor for next page
 - **THEN** results SHALL not skip or duplicate messages
+
+#### Scenario: Session list includes title and model
+- **WHEN** the client requests `GET /api/ai-chat/sessions`
+- **THEN** each session in the response SHALL include `title` and `model` fields
+- **AND** `title` and `model` SHALL be `null` for sessions that predate the columns
 
 ### Requirement: Web AI Chat SHALL provide typed failure classification and graceful degradation
 
@@ -93,9 +105,14 @@ All chat outcomes SHALL produce structured audit and telemetry data with request
 
 ### Requirement: Production flow SHALL replace quick-validation mode
 
-The previous quick-validation-only flow SHALL be removed or redirected so only production chat flow remains active.
+The previous quick-validation-only flow SHALL be removed or redirected so only production chat flow remains active, including in the web client.
 
 #### Scenario: Legacy validation entry path behavior
 - **WHEN** user navigates to legacy quick-validation entry
 - **THEN** navigation SHALL resolve to production chat capability
 - **AND** no separate quick-validation operational mode SHALL remain
+
+#### Scenario: Web client resolves legacy validation mode to production chat
+- **WHEN** a user enters the web chat surface that previously ran quick-validation mode
+- **THEN** the web client SHALL present the production chat experience backed by `/api/ai-chat/*`
+- **AND** SHALL NOT expose a separate quick-validation operational mode or toggle

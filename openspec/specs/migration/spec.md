@@ -6,17 +6,15 @@ Define the backward-compatible migration path from YAML bootstrap configuration 
 ## Requirements
 
 ### REQ-MIGRATE-001: Backward-compatible startup
-Existing deployments using `gateway.config.yaml` SHALL continue to work without modification. The gateway SHALL detect whether a database exists and behave accordingly:
-- **No database exists**: Create database, apply migrations, seed from YAML.
-- **Database exists**: Open database, apply pending migrations, ignore YAML.
+Existing deployments using `gateway.config.yaml` SHALL continue to start without requiring operators to remove legacy environment variables. The gateway SHALL always open/create the database, apply pending migrations, ensure `gateway_config(id=1)` exists, and continue startup even when `models` and `model_chains` are empty.
 
-**Rationale**: Zero-downtime migration. Operators do not need to manually convert YAML to database format.
+**Rationale**: Startup behavior must be DB-authoritative and permissive so provisioning can happen after process boot.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
 
 ### REQ-MIGRATE-002: YAML as seed source only
-The `gateway.config.yaml` file SHALL only be read on first startup (when no database exists). After seeding, the YAML file is not read again. Operators MAY delete or retain the YAML file; it has no effect after first startup.
+`gateway.config.yaml` SHALL NOT be used for runtime seeding behavior in startup. Startup behavior SHALL be independent of YAML presence and SHALL rely on database state plus environment variables.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
@@ -28,22 +26,19 @@ The `GATEWAY_DB_PATH` environment variable SHALL specify the database file locat
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
 
 ### REQ-MIGRATE-004: Seed preserves all YAML configuration
-When seeding from YAML, the gateway SHALL persist:
-- All models from the `models` array with `source='static'`
-- All chains from the `model_chains` array
-- All gateway-level settings (default_model, timeouts, copilot_proxy config, etc.)
+Runtime startup SHALL NOT persist YAML-derived configuration into database state. Configuration persistence is handled by database writes through administrative/runtime management paths.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
 
 ### REQ-MIGRATE-005: Seed validates before persisting
-Before seeding, the gateway SHALL run the existing YAML validation logic (schema validation, cross-field validation for chains). If validation fails, the gateway SHALL fail to start with an error message. No partial database state shall be created.
+Startup SHALL NOT block on YAML validation because YAML is not part of the runtime bootstrap path.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
 
 ### REQ-MIGRATE-006: Idempotent seeding
-If the database exists but is empty (no rows in `models`, `model_chains`, `gateway_config`), the gateway SHALL seed from YAML. This supports the case where the database file was manually created but not populated.
+If the database exists but is missing `gateway_config(id=1)`, startup SHALL create the singleton with defaults and proceed. Startup SHALL NOT require model or chain rows to exist.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
@@ -88,7 +83,7 @@ The gateway SHALL NOT support migrating from a pre-existing database created by 
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
 
 ### REQ-MIGRATE-012: GATEWAY_CONFIG_PATH remains for compatibility
-The `GATEWAY_CONFIG_PATH` environment variable SHALL remain supported for backward compatibility, but its value is only used during seeding. If both `GATEWAY_DB_PATH` and `GATEWAY_CONFIG_PATH` are set, the database takes precedence after first startup.
+The `GATEWAY_CONFIG_PATH` environment variable SHALL remain accepted for compatibility, but it SHALL be ignored by runtime startup behavior.
 #### Scenario: Requirement behavior is enforced
 - **WHEN** the gateway evaluates this requirement
 - **THEN** the gateway SHALL enforce the behavior described by this requirement
