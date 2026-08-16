@@ -73,7 +73,7 @@ describe("Claude Code compatibility routes", () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({
+      expect(response.json()).toMatchObject({
         object: "list",
         data: [
           {

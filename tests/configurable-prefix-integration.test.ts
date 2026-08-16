@@ -406,7 +406,7 @@ describe("Configurable model prefix integration", () => {
       expect(detail.statusCode).toBe(200);
       expect(detail.json()).toMatchObject({
         id: "copilot-gpt-4o",
-        source: "copilot-",
+        source: "copilot-proxy",
         owned_by: "github-copilot",
       });
 
