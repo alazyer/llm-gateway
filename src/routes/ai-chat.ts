@@ -10,7 +10,7 @@ import {
   UpstreamHttpError,
   type ChatCompletionsTransport,
 } from "../upstream/chat-completions-client.js";
-import type { ChatCompletionRequest } from "../contracts.js";
+import type { ChatCompletionRequest, ChatContentPart } from "../contracts.js";
 import { insertAiChatAuditEvent } from "../db/ai-chat-audit-repository.js";
 
 import {
@@ -35,6 +35,32 @@ const AUTO_TITLE_MAX_LENGTH = 60;
 const SESSION_TITLE_MIN_LENGTH = 1;
 const SESSION_TITLE_MAX_LENGTH = 120;
 
+/**
+ * Multimodal image-attachment limits. Bounded to fit the default 1 MiB
+ * `max_body_size_kb` body limit: a single image ≤ ~700 KB base64 leaves room
+ * for the JSON envelope, prompt, and metadata without exceeding the limit (so
+ * oversize payloads are rejected here as a typed `VALIDATION_ERROR` rather than
+ * leaking through as a generic Fastify 413). The default body limit is left
+ * untouched so no other route is affected.
+ */
+const ALLOWED_IMAGE_MIME_TYPES = [
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+] as const;
+const MAX_ATTACHMENTS_PER_MESSAGE = 1;
+// ~700 KiB base64 (the data URL prefix is tiny and accounted for by the slack).
+const MAX_IMAGE_DATA_URL_BYTES = 700 * 1024;
+
+/**
+ * Versioned envelope stored in `ai_chat_messages.content` for a user message
+ * that carries image attachments. Text-only messages store raw text (no
+ * envelope), so the column stays backwards-compatible. `v` lets the read path
+ * evolve the shape later without ambiguity.
+ */
+const CONTENT_ENVELOPE_VERSION = 1;
+
 const LOCALIZED_MESSAGES = {
   RATE_LIMITED: "Rate limit exceeded. Please wait and retry shortly.",
   UPSTREAM_TIMEOUT: "The model took too long to respond. Please try again.",
@@ -56,6 +82,32 @@ const sendMessageBodySchema = z.object({
     locale: z.string().optional(),
     timezone: z.string().optional(),
   }).optional(),
+  attachments: z
+    .array(
+      z.object({
+        id: z.string().trim().min(1),
+        type: z.enum(ALLOWED_IMAGE_MIME_TYPES),
+        // A base64 data URL (`data:<type>;base64,...`). Size is validated in
+        // the route-level check so the rejection carries a typed
+        // `VALIDATION_ERROR` instead of a generic zod parse message.
+        dataUrl: z.string().trim().min(1),
+      }),
+    )
+    .max(MAX_ATTACHMENTS_PER_MESSAGE)
+    .optional(),
+}).superRefine((value, ctx) => {
+  if (!value.attachments || value.attachments.length === 0) {
+    return;
+  }
+  value.attachments.forEach((attachment, index) => {
+    if (attachment.dataUrl.length > MAX_IMAGE_DATA_URL_BYTES) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: `Attachment ${index} exceeds the ${Math.round(MAX_IMAGE_DATA_URL_BYTES / 1024)} KB image limit.`,
+        path: ["attachments", index, "dataUrl"],
+      });
+    }
+  });
 });
 
 const paginationQuerySchema = z.object({
@@ -432,6 +484,107 @@ function deriveSessionTitle(prompt: string): string {
   return `${collapsed.slice(0, AUTO_TITLE_MAX_LENGTH)}…`;
 }
 
+/** A validated image attachment carried in a chat message request. */
+interface AiChatAttachment {
+  id: string;
+  type: (typeof ALLOWED_IMAGE_MIME_TYPES)[number];
+  dataUrl: string;
+}
+
+/**
+ * Build the upstream `content` for the user message. With no attachments the
+ * content is a plain string (unchanged text-only behavior). With attachments it
+ * is an OpenAI chat content-parts array: one text part followed by one
+ * `image_url` part per attachment. The upstream `ChatCompletionsClient` passes
+ * content parts through to the OpenAI SDK unchanged.
+ *
+ * The route stays stateless: only this single message is sent upstream. Prior
+ * turns (including any persisted images) are never reconstructed into the
+ * `messages` array.
+ */
+function buildUserContent(
+  prompt: string,
+  attachments: AiChatAttachment[] | undefined,
+): string | ChatContentPart[] {
+  if (!attachments || attachments.length === 0) {
+    return prompt;
+  }
+  const parts: ChatContentPart[] = [{ type: "text", text: prompt }];
+  for (const attachment of attachments) {
+    parts.push({ type: "image_url", image_url: { url: attachment.dataUrl } });
+  }
+  return parts;
+}
+
+/** Shape of the versioned envelope persisted for multimodal user messages. */
+interface MultimodalContentEnvelope {
+  v: typeof CONTENT_ENVELOPE_VERSION;
+  text: string;
+  images: Array<{ id: string; type: string; dataUrl: string }>;
+}
+
+/**
+ * Serialize a user message for the `content` TEXT column. Text-only messages
+ * store raw text (backwards-compatible). Multimodal messages store a versioned
+ * JSON envelope so the read path can restore the text and each image.
+ */
+function encodeMessageContent(
+  prompt: string,
+  attachments: AiChatAttachment[] | undefined,
+): string {
+  if (!attachments || attachments.length === 0) {
+    return prompt;
+  }
+  const envelope: MultimodalContentEnvelope = {
+    v: CONTENT_ENVELOPE_VERSION,
+    text: prompt,
+    images: attachments.map((attachment) => ({
+      id: attachment.id,
+      type: attachment.type,
+      dataUrl: attachment.dataUrl,
+    })),
+  };
+  return JSON.stringify(envelope);
+}
+
+/**
+ * Detect and decode a versioned multimodal envelope from a stored `content`
+ * value. Returns `{ text, attachments }` for an envelope, or `{ text: content,
+ * attachments: [] }` for a plain-text (or unparseable) value, so old rows and
+ * future text-only writes restore harmlessly.
+ */
+function decodeMessageContent(content: string): { text: string; attachments: AiChatAttachment[] } {
+  if (!content.startsWith("{")) {
+    return { text: content, attachments: [] };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(content) as unknown;
+  } catch {
+    return { text: content, attachments: [] };
+  }
+  if (
+    !parsed
+    || typeof parsed !== "object"
+    || (parsed as MultimodalContentEnvelope).v !== CONTENT_ENVELOPE_VERSION
+    || typeof (parsed as MultimodalContentEnvelope).text !== "string"
+    || !Array.isArray((parsed as MultimodalContentEnvelope).images)
+  ) {
+    return { text: content, attachments: [] };
+  }
+  const envelope = parsed as MultimodalContentEnvelope;
+  return {
+    text: envelope.text,
+    attachments: envelope.images.map((image) => ({
+      id: image.id,
+      // Re-coerce to the literal union; invalid types were already rejected at
+      // write time. A non-image type here would only come from manual DB edits.
+      type: image.type as AiChatAttachment["type"],
+      dataUrl: image.dataUrl,
+    })),
+  };
+}
+
 async function callChatCompletionsWithRetry(
   request: FastifyRequest,
   payload: Record<string, unknown>,
@@ -785,6 +938,30 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       throw error;
     }
 
+    // Capability gate for image input: runs immediately after model resolution
+    // and BEFORE any session or user-message insert, so a rejected image leaves
+    // no DB trace except a failed-outcome audit event — mirroring the existing
+    // unroutable-model VALIDATION_ERROR. The flag is read directly off the
+    // resolved GatewayModelConfig (no extra DB lookup).
+    const hasAttachments = parsed.attachments !== undefined && parsed.attachments.length > 0;
+    if (hasAttachments && !routedModel.model.supportsImageInput) {
+      const error = new AiChatRouteError(
+        400,
+        "VALIDATION_ERROR",
+        `Model \`${routedModel.stampedModel}\` does not support image input.`,
+      );
+      writeAuditEvent(request, {
+        actor: userId,
+        action: "send",
+        requestId,
+        sessionId,
+        outcome: "failed",
+        retryCount: 0,
+        errorClass: error.errorClass,
+      });
+      return sendRouteError(reply, error, requestId);
+    }
+
     if (!existingSession) {
       insertAiChatSession({
         id: sessionId,
@@ -807,7 +984,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       session_id: sessionId,
       user_id: userId,
       role: "user",
-      content: parsed.prompt,
+      content: encodeMessageContent(parsed.prompt, parsed.attachments),
       model: null,
       request_id: null,
       status: "done",
@@ -831,7 +1008,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       try {
         upstream = await callChatCompletionsWithRetry(request, {
           stream: false,
-          messages: [{ role: "user", content: parsed.prompt }],
+          messages: [{ role: "user", content: buildUserContent(parsed.prompt, parsed.attachments) }],
         }, routedModel.model, getClient(routedModel.model));
       } catch (error) {
         if (error instanceof AiChatRouteError) {
@@ -982,7 +1159,7 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
     try {
       upstream = await callChatCompletionsWithRetry(request, {
         stream: true,
-        messages: [{ role: "user", content: parsed.prompt }],
+        messages: [{ role: "user", content: buildUserContent(parsed.prompt, parsed.attachments) }],
       }, routedModel.model, getClient(routedModel.model));
     } catch (error) {
       if (error instanceof AiChatRouteError) {
@@ -1328,22 +1505,26 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
       : null;
 
     return reply.code(200).send({
-      data: page.map((row) => ({
-        messageId: row.id,
-        role: row.role,
-        content: row.content,
-        status: row.status,
-        model: row.model,
-        requestId: row.request_id,
-        usage: row.input_tokens === null || row.output_tokens === null || row.total_tokens === null
-          ? null
-          : {
-            inputTokens: row.input_tokens,
-            outputTokens: row.output_tokens,
-            totalTokens: row.total_tokens,
-          },
-        createdAt: row.created_at,
-      })),
+      data: page.map((row) => {
+        const decoded = decodeMessageContent(row.content);
+        return {
+          messageId: row.id,
+          role: row.role,
+          content: decoded.text,
+          attachments: decoded.attachments,
+          status: row.status,
+          model: row.model,
+          requestId: row.request_id,
+          usage: row.input_tokens === null || row.output_tokens === null || row.total_tokens === null
+            ? null
+            : {
+              inputTokens: row.input_tokens,
+              outputTokens: row.output_tokens,
+              totalTokens: row.total_tokens,
+            },
+          createdAt: row.created_at,
+        };
+      }),
       nextCursor,
     });
   });

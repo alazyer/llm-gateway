@@ -44,8 +44,13 @@ Each YAML entry supports:
 - `owned_by` - owner string returned in model discovery
 - `supports_tools` - optional, defaults to `true`; reject tool requests when `false`
 - `supports_streaming` - optional, defaults to `true`; reject streaming requests when `false`
+- `supports_image_input` - optional, defaults to `false`; when `true`, `GET /v1/models` advertises `input_modalities: ["text", "image"]` and the web chat composer enables image attachments for the model
 - `unknown_field_mode` - optional, one of `warn` or `enforce` (defaults to `warn`) for `/responses` top-level unknown fields
 - `unknown_field_window_requests` - optional, rolling request window used before unknown-field counters reset (defaults to `100`)
+
+### Web chat image attachments
+
+The web chat composer accepts a single image attachment per message when the active model has `supports_image_input: true`. Attachments are sent as base64 data URLs in the `attachments` field of `POST /api/ai-chat/messages` and forwarded to the upstream model as OpenAI `image_url` content parts. Images are bounded to one per message and ~700 KB base64 so a request fits the default 1 MiB `max_body_size_kb` body limit; oversize or unsupported attachments are rejected with `400 VALIDATION_ERROR` rather than a generic 413. Image attachments persist with the session and restore from history on reload. If the active model does not support image input, the attach control is disabled; switching to a non-image model while an attachment is pending blocks Send with a hint to remove it or switch back, rather than silently discarding it.
 
 The top-level YAML gateway settings also support:
 

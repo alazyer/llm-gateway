@@ -388,6 +388,10 @@ export class CopilotProxyConnectionRegistry {
         created: now,
         supports_tools: model.capabilities.supports_tools ? 1 : 0,
         supports_streaming: model.capabilities.supports_streaming ? 1 : 0,
+        // Copilot proxy registrations do not declare image input today; default
+        // to text-only. `createCopilotModelRecord` derives input_modalities from
+        // this column (see src/routes/responses.ts).
+        supports_image_input: 0,
         unknown_field_mode: "warn",
         unknown_field_window_requests: 100,
         source: "copilot-proxy",

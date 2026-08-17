@@ -18,6 +18,7 @@ export interface ModelRow {
   created: number;
   supports_tools: number;
   supports_streaming: number;
+  supports_image_input: number;
   unknown_field_mode: string;
   unknown_field_window_requests: number;
   source: string | null;

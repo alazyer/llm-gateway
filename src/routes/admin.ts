@@ -46,6 +46,7 @@ interface AdminModelSummary {
   status_changed_at: number | null;
   supports_tools: boolean;
   supports_streaming: boolean;
+  supports_image_input: boolean;
 }
 
 interface AdminModelDetail extends AdminModelSummary {
@@ -119,6 +120,7 @@ interface CreateModelBody {
   owned_by?: string;
   supports_tools?: boolean;
   supports_streaming?: boolean;
+  supports_image_input?: boolean;
   unknown_field_mode?: "warn" | "enforce";
   unknown_field_window_requests?: number;
   source?: string;
@@ -132,6 +134,7 @@ interface UpdateModelBody {
   owned_by?: string;
   supports_tools?: boolean;
   supports_streaming?: boolean;
+  supports_image_input?: boolean;
   unknown_field_mode?: "warn" | "enforce";
   unknown_field_window_requests?: number;
   source?: string;
@@ -197,6 +200,7 @@ function modelRowToSummary(row: ModelRow): AdminModelSummary {
     status_changed_at: row.status_changed_at,
     supports_tools: row.supports_tools === 1,
     supports_streaming: row.supports_streaming === 1,
+    supports_image_input: row.supports_image_input === 1,
   };
 }
 
@@ -367,6 +371,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       created: now,
       supports_tools: boolToInt(body.supports_tools ?? true),
       supports_streaming: boolToInt(body.supports_streaming ?? true),
+      supports_image_input: boolToInt(body.supports_image_input ?? false),
       unknown_field_mode: body.unknown_field_mode ?? "warn",
       unknown_field_window_requests: body.unknown_field_window_requests ?? 100,
       source: body.source ?? "static",
@@ -408,6 +413,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (body.owned_by !== undefined) partial.owned_by = body.owned_by;
     if (body.supports_tools !== undefined) partial.supports_tools = boolToInt(body.supports_tools);
     if (body.supports_streaming !== undefined) partial.supports_streaming = boolToInt(body.supports_streaming);
+    if (body.supports_image_input !== undefined) partial.supports_image_input = boolToInt(body.supports_image_input);
     if (body.unknown_field_mode !== undefined) partial.unknown_field_mode = body.unknown_field_mode;
     if (body.unknown_field_window_requests !== undefined) partial.unknown_field_window_requests = body.unknown_field_window_requests;
     if (body.source !== undefined) partial.source = body.source;

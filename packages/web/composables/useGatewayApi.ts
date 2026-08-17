@@ -67,10 +67,26 @@ export interface AiChatSessionListResponse {
   nextCursor: string | null;
 }
 
+/**
+ * An image attachment carried inline in a chat message as a base64 data URL.
+ * Mirrors the backend `attachments` array shape; bounded to one image per
+ * message and a ~700 KB base64 cap (see `chat.vue` validation).
+ */
+export interface AiChatAttachment {
+  id: string;
+  type: string;
+  dataUrl: string;
+  /** Original filename, if known — display only. */
+  name?: string;
+  /** Raw byte size of the underlying file — display only. */
+  size?: number;
+}
+
 export interface AiChatHistoryMessage {
   messageId: string;
   role: "user" | "assistant";
   content: string;
+  attachments: AiChatAttachment[];
   status: "streaming" | "done" | "failed";
   model: string | null;
   requestId: string | null;
@@ -89,6 +105,7 @@ export interface AiChatHistoryMessage {
 export interface AiChatChatModel {
   id: string;
   displayName: string;
+  supportsImageInput: boolean;
 }
 
 export interface AiChatMessageListResponse {
@@ -146,6 +163,7 @@ export interface StreamAiChatMessageOptions {
   sessionId?: string;
   clientMessageId: string;
   model?: string;
+  attachments?: AiChatAttachment[];
   timeoutMs?: number;
   signal?: AbortSignal;
   callbacks: AiChatStreamCallbacks;
@@ -565,6 +583,7 @@ export function useGatewayApi() {
     sessionId?: string;
     clientMessageId: string;
     model?: string;
+    attachments?: AiChatAttachment[];
     signal?: AbortSignal;
   }): Promise<AiChatSendMessageResponse> {
     const controller = new AbortController();
@@ -590,6 +609,9 @@ export function useGatewayApi() {
           clientMessageId: options.clientMessageId,
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
           ...(options.model ? { model: options.model } : {}),
+          ...(options.attachments && options.attachments.length > 0
+            ? { attachments: options.attachments.map(({ id, type, dataUrl }) => ({ id, type, dataUrl })) }
+            : {}),
         }),
         signal: controller.signal,
       });
@@ -769,6 +791,9 @@ export function useGatewayApi() {
           clientMessageId: options.clientMessageId,
           ...(options.sessionId ? { sessionId: options.sessionId } : {}),
           ...(options.model ? { model: options.model } : {}),
+          ...(options.attachments && options.attachments.length > 0
+            ? { attachments: options.attachments.map(({ id, type, dataUrl }) => ({ id, type, dataUrl })) }
+            : {}),
         }),
         signal: controller.signal,
       });
@@ -839,6 +864,7 @@ export function useGatewayApi() {
         capabilities?: {
           supports_streaming?: boolean;
           supports_tool_calls?: boolean;
+          input_modalities?: string[];
         };
       }>;
     }>("/v1/models");
@@ -846,6 +872,8 @@ export function useGatewayApi() {
     return response.data.map((model) => ({
       id: model.id,
       displayName: model.display_name || model.id,
+      supportsImageInput: Array.isArray(model.capabilities?.input_modalities)
+        && model.capabilities!.input_modalities!.includes("image"),
     }));
   }
 
@@ -924,6 +952,7 @@ export function useGatewayApi() {
         status_changed_at: number | null;
         supports_tools: boolean;
         supports_streaming: boolean;
+        supports_image_input: boolean;
       }>;
     }>("/admin/models", { params });
   }
@@ -942,6 +971,7 @@ export function useGatewayApi() {
         status_changed_at: number | null;
         supports_tools: boolean;
         supports_streaming: boolean;
+        supports_image_input: boolean;
         unknown_field_mode: string;
         unknown_field_window_requests: number;
         source: string | null;
@@ -961,6 +991,7 @@ export function useGatewayApi() {
     owned_by?: string;
     supports_tools?: boolean;
     supports_streaming?: boolean;
+    supports_image_input?: boolean;
     unknown_field_mode?: string;
     unknown_field_window_requests?: number;
     source?: string;
@@ -980,6 +1011,7 @@ export function useGatewayApi() {
       owned_by?: string;
       supports_tools?: boolean;
       supports_streaming?: boolean;
+      supports_image_input?: boolean;
       unknown_field_mode?: string;
       unknown_field_window_requests?: number;
       status?: string;

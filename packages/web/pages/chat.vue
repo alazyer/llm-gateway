@@ -196,6 +196,23 @@
                   <template v-else-if="entry.status === 'failed'">
                     Chat failed.
                   </template>
+
+                  <div
+                    v-if="entry.role === 'user' && entry.attachments.length > 0"
+                    class="mt-2 flex flex-wrap gap-2"
+                  >
+                    <div
+                      v-for="attachment in entry.attachments"
+                      :key="attachment.id"
+                      class="relative overflow-hidden rounded-lg border border-slate-200 dark:border-white/10"
+                    >
+                      <img
+                        :src="attachment.dataUrl"
+                        :alt="attachment.name ?? 'attached image'"
+                        class="h-24 w-24 object-cover"
+                      >
+                    </div>
+                  </div>
                 </article>
 
                 <UAlert
@@ -237,16 +254,108 @@
             class="chat-textarea"
             rows="3"
             :placeholder="activeSessionId ? 'Send a message…' : 'Send a message to start a new session…'"
-            :disabled="!canSend"
+            :disabled="!hasGatewayCredential"
             @keydown.enter.exact.prevent="sendMessage"
             @keydown.enter.shift.exact.stop
           />
+
+          <input
+            ref="fileInputEl"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            class="hidden"
+            data-testid="image-file-input"
+            @change="onFileSelected"
+          >
+
+          <div
+            v-if="attachments.length > 0 || attachmentError || (!activeModelSupportsImage && hasGatewayCredential)"
+            class="mt-2 flex flex-wrap items-center gap-2"
+          >
+            <div
+              v-for="attachment in attachments"
+              :key="attachment.id"
+              class="group relative flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1.5 dark:border-white/10 dark:bg-white/5"
+            >
+              <img
+                :src="attachment.dataUrl"
+                :alt="attachment.name ?? 'attached image'"
+                class="size-9 rounded-md object-cover"
+              >
+              <span class="max-w-[10rem] truncate text-xs text-slate-600 dark:text-slate-300">
+                {{ attachment.name ?? "image" }}
+              </span>
+              <UButton
+                color="neutral"
+                variant="ghost"
+                size="xs"
+                icon="i-lucide-x"
+                aria-label="Remove attachment"
+                :disabled="isSubmitting"
+                @click="removeAttachment(attachment.id)"
+              />
+            </div>
+
+            <UButton
+              v-if="activeModelSupportsImage && attachments.length < MAX_ATTACHMENTS && !isSubmitting"
+              color="neutral"
+              variant="ghost"
+              size="xs"
+              icon="i-lucide-image-plus"
+              aria-label="Attach image"
+              @click="openFilePicker"
+            >
+              Add image
+            </UButton>
+          </div>
+
+          <p
+            v-if="attachmentError"
+            class="mt-1 text-xs text-rose-600 dark:text-rose-400"
+          >
+            {{ attachmentError }}
+          </p>
+
+          <UAlert
+            v-if="hasIncompatibleAttachment"
+            color="warning"
+            variant="subtle"
+            icon="i-lucide-image-off"
+            title="This model doesn't support images"
+            description="Remove the attachment or switch to an image-capable model to send."
+            class="mt-2"
+          >
+            <template #actions>
+              <UButton
+                color="warning"
+                variant="soft"
+                size="xs"
+                icon="i-lucide-trash-2"
+                :disabled="isSubmitting"
+                @click="clearAttachments"
+              >
+                Remove attachment
+              </UButton>
+            </template>
+          </UAlert>
 
           <div class="mt-3 flex flex-wrap items-center justify-between gap-3">
             <p class="text-xs text-slate-500 dark:text-slate-400">
               {{ stateLabel }}
             </p>
             <div class="flex items-center gap-2">
+              <UButton
+                v-if="activeModelSupportsImage && attachments.length < MAX_ATTACHMENTS && !isSubmitting && hasGatewayCredential"
+                type="button"
+                color="neutral"
+                variant="subtle"
+                icon="i-lucide-paperclip"
+                :disabled="!hasGatewayCredential"
+                aria-label="Attach image"
+                @click="openFilePicker"
+              >
+                <span class="hidden sm:inline">Image</span>
+              </UButton>
               <UButton
                 v-if="isSubmitting"
                 type="button"
@@ -288,6 +397,7 @@
 
 <script setup lang="ts">
 import type {
+  AiChatAttachment,
   AiChatChatModel,
   AiChatHistoryMessage,
   AiChatSessionSummary,
@@ -299,6 +409,11 @@ import {
   resolveSelectedModel,
 } from "~/composables/useGatewayApi";
 import { classifyGatewayError } from "~/utils/chatErrorClassification";
+import {
+  MAX_ATTACHMENTS,
+  canAddAttachment,
+  validateImageAttachment,
+} from "~/utils/attachments";
 
 definePageMeta({ middleware: ["auth", "web-chat-validation"] });
 
@@ -308,6 +423,7 @@ interface ChatMessageEntry {
   id: string;
   role: "user" | "assistant";
   content: string;
+  attachments: AiChatAttachment[];
   status: ChatStatus;
   model: string | null;
   requestId?: string;
@@ -352,15 +468,40 @@ const currentAbort = ref<AbortController | null>(null);
 const lastFailedPrompt = ref("");
 const ariaAnnouncement = ref("");
 
+// Image-attachment composer state. Bounded to one image per message and a
+// ~700 KB base64 cap so the request fits the default 1 MiB body limit.
+// Validation rules live in `~/utils/attachments` so they are unit-testable.
+const attachments = ref<AiChatAttachment[]>([]);
+const attachmentError = ref<string | null>(null);
+const fileInputEl = ref<HTMLInputElement | null>(null);
+
+// Whether the active model accepts image input. Drives the attach-control gate.
+const activeModelSupportsImage = computed(() => {
+  const model = models.value.find((m) => m.id === selectedModelId.value);
+  return model?.supportsImageInput ?? false;
+});
+
+// A pending (unsent) image is incompatible with the active model — block Send
+// rather than silently stripping the image (the backend would reject it).
+const hasIncompatibleAttachment = computed(
+  () => attachments.value.length > 0 && !activeModelSupportsImage.value,
+);
+
 // Message log element for auto-scroll.
 const messageLogEl = ref<HTMLElement | null>(null);
 
-// Sending is allowed when authenticated. A new session is created on the
-// backend when no active session is selected yet.
-const canSend = computed(() => hasGatewayCredential.value);
+// Sending is allowed when authenticated, a prompt is present (text part is
+// mandatory per the backend `prompt.min(1)` invariant), and any pending
+// attachment is compatible with the active model.
+const canSend = computed(
+  () => hasGatewayCredential.value && !hasIncompatibleAttachment.value,
+);
 
 const stateLabel = computed(() => {
   if (!hasGatewayCredential.value) return "Sign in to chat.";
+  if (hasIncompatibleAttachment.value) {
+    return "Remove the attachment or switch to an image-capable model to send.";
+  }
   if (isSubmitting.value) return "Streaming response…";
   if (!activeSessionId.value) return "Idle — ready for a new session.";
   return "Idle — ready for your next message.";
@@ -423,6 +564,7 @@ function historyMessageToEntry(message: AiChatHistoryMessage): ChatMessageEntry 
     id: message.messageId,
     role: message.role,
     content: message.content,
+    attachments: message.attachments ?? [],
     status: message.status,
     model: message.model,
     requestId: message.requestId ?? undefined,
@@ -598,6 +740,66 @@ function generateClientMessageId(): string {
   });
 }
 
+// ---- Attachments ----
+
+function openFilePicker(): void {
+  if (!activeModelSupportsImage.value || attachments.value.length >= MAX_ATTACHMENTS) {
+    return;
+  }
+  fileInputEl.value?.click();
+}
+
+function onFileSelected(event: Event): void {
+  const input = event.target as HTMLInputElement;
+  const files = input.files ? Array.from(input.files) : [];
+  // Reset the input so re-selecting the same file fires `change` again.
+  input.value = "";
+  attachmentError.value = null;
+
+  for (const file of files) {
+    if (!canAddAttachment(attachments.value.length)) {
+      attachmentError.value = "Only one image per message is supported.";
+      break;
+    }
+    const rejection = validateImageAttachment(file);
+    if (rejection) {
+      attachmentError.value = rejection;
+      continue;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      if (!dataUrl) {
+        attachmentError.value = `${file.name}: could not read image.`;
+        return;
+      }
+      attachments.value.push({
+        id: makeId("att"),
+        type: file.type,
+        dataUrl,
+        name: file.name,
+        size: file.size,
+      });
+    };
+    reader.onerror = () => {
+      attachmentError.value = `${file.name}: could not read image.`;
+    };
+    reader.readAsDataURL(file);
+  }
+}
+
+function removeAttachment(id: string): void {
+  attachments.value = attachments.value.filter((a) => a.id !== id);
+  if (attachments.value.length === 0) {
+    attachmentError.value = null;
+  }
+}
+
+function clearAttachments(): void {
+  attachments.value = [];
+  attachmentError.value = null;
+}
+
 async function sendMessage(): Promise<void> {
   if (!hasGatewayCredential.value) {
     ariaAnnouncement.value = "Authentication required to chat.";
@@ -607,11 +809,16 @@ async function sendMessage(): Promise<void> {
 
   const userPrompt = prompt.value.trim();
   if (!userPrompt) return;
+  if (hasIncompatibleAttachment.value) return;
 
+  // Snapshot the pending attachments into the timeline entry and clear the
+  // composer; they are restored from history on completion regardless.
+  const sentAttachments = attachments.value.slice();
   const userEntry: ChatMessageEntry = {
     id: makeId("user"),
     role: "user",
     content: userPrompt,
+    attachments: sentAttachments,
     status: "done",
     model: null,
   };
@@ -619,12 +826,14 @@ async function sendMessage(): Promise<void> {
     id: makeId("assistant"),
     role: "assistant",
     content: "",
+    attachments: [],
     status: "streaming",
     model: null,
   };
   entries.value.push(userEntry, assistantEntry);
 
   prompt.value = "";
+  clearAttachments();
   isSubmitting.value = true;
   ariaAnnouncement.value = "Chat request started.";
 
@@ -638,6 +847,7 @@ async function sendMessage(): Promise<void> {
       clientMessageId,
       ...(activeSessionId.value ? { sessionId: activeSessionId.value } : {}),
       ...(selectedModelId.value ? { model: selectedModelId.value } : {}),
+      ...(sentAttachments.length > 0 ? { attachments: sentAttachments } : {}),
       signal: abortController.signal,
       callbacks: {
         onStarted: (event) => {

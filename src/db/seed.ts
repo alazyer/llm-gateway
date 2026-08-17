@@ -82,6 +82,7 @@ export function seedFromConfig(config: AppConfig): void {
         created: model.created,
         supports_tools: boolToInt(model.supportsTools),
         supports_streaming: boolToInt(model.supportsStreaming),
+        supports_image_input: boolToInt(model.supportsImageInput),
         unknown_field_mode: model.unknownFieldMode,
         unknown_field_window_requests: model.unknownFieldWindowRequests,
         source: "static",

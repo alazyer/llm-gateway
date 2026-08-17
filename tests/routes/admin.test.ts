@@ -40,6 +40,7 @@ function makeModel(overrides: Partial<ModelRow> & { name: string }): ModelRow {
     created: overrides.created ?? now,
     supports_tools: overrides.supports_tools ?? 1,
     supports_streaming: overrides.supports_streaming ?? 1,
+    supports_image_input: overrides.supports_image_input ?? 0,
     unknown_field_mode: overrides.unknown_field_mode ?? "warn",
     unknown_field_window_requests: overrides.unknown_field_window_requests ?? 100,
     source: overrides.source ?? "static",

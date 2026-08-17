@@ -149,6 +149,7 @@ model_chains:
       created: 1_718_000_111,
       supports_tools: 1,
       supports_streaming: 1,
+      supports_image_input: 0,
       unknown_field_mode: "warn",
       unknown_field_window_requests: 100,
       source: "copilot-proxy",

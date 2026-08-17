@@ -29,6 +29,7 @@ const yamlModelSchema = z
     created: z.number().int().nonnegative().optional(),
     supports_tools: z.boolean().default(true),
     supports_streaming: z.boolean().default(true),
+    supports_image_input: z.boolean().default(false),
     unknown_field_mode: z.enum(["warn", "enforce"]).default("warn"),
     unknown_field_window_requests: z.coerce.number().int().positive().default(100),
   })
@@ -97,6 +98,7 @@ export interface GatewayModelConfig {
   created: number;
   supportsTools: boolean;
   supportsStreaming: boolean;
+  supportsImageInput: boolean;
   unknownFieldMode: "warn" | "enforce";
   unknownFieldWindowRequests: number;
   status: "active" | "inactive";
@@ -187,6 +189,7 @@ function normalizeModelEntry(
     created: value.created ?? getCurrentTimestamp(),
     supportsTools: value.supports_tools,
     supportsStreaming: value.supports_streaming,
+    supportsImageInput: value.supports_image_input,
     unknownFieldMode: value.unknown_field_mode,
     unknownFieldWindowRequests: value.unknown_field_window_requests,
     status: "active",

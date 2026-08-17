@@ -92,8 +92,8 @@ interface ModelRecord {
   root: string;
   parent: null;
   capabilities: {
-    input_modalities: ["text"];
-    output_modalities: ["text"];
+    input_modalities: Array<"text" | "image">;
+    output_modalities: Array<"text" | "image">;
     supports_responses_api: true;
     supports_streaming: boolean;
     supports_system_messages: true;
@@ -183,7 +183,7 @@ function createModelRecord(model: GatewayModelConfig): ModelRecord {
     root: model.name,
     parent: null,
     capabilities: {
-      input_modalities: ["text"],
+      input_modalities: model.supportsImageInput ? ["text", "image"] : ["text"],
       output_modalities: ["text"],
       supports_responses_api: true,
       supports_streaming: model.supportsStreaming,
@@ -224,6 +224,8 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
     root: model.id,
     parent: null,
     capabilities: {
+      // Copilot proxy registrations do not declare image input today; default
+      // to text-only until the registration capability shape grows an image flag.
       input_modalities: ["text"],
       output_modalities: ["text"],
       supports_responses_api: true,
@@ -262,7 +264,10 @@ function createChainModelRecord(chain: ModelChainConfig): ModelRecord {
     root: `chain-${chain.name}`,
     parent: null,
     capabilities: {
-      input_modalities: ["text"],
+      // A chain advertises image input only when ALL members support it — a
+      // blind fallback would silently drop an image mid-request. Stricter than
+      // the `some()` derivation used for streaming/tools on purpose.
+      input_modalities: chain.models.every((entry) => entry.modelConfig.supportsImageInput) ? ["text", "image"] : ["text"],
       output_modalities: ["text"],
       supports_responses_api: true,
       supports_streaming: chain.models.some((entry) => entry.modelConfig.supportsStreaming),
