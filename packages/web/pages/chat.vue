@@ -414,6 +414,14 @@ import {
   canAddAttachment,
   validateImageAttachment,
 } from "~/utils/attachments";
+import {
+  activeModelSupportsImage as computeActiveModelSupportsImage,
+  canSend as computeCanSend,
+  hasIncompatibleAttachment as computeHasIncompatibleAttachment,
+} from "~/utils/composerGating";
+import {
+  historyMessageToEntry as mapHistoryMessageToEntry,
+} from "~/utils/chatTimeline";
 
 definePageMeta({ middleware: ["auth", "web-chat-validation"] });
 
@@ -476,15 +484,15 @@ const attachmentError = ref<string | null>(null);
 const fileInputEl = ref<HTMLInputElement | null>(null);
 
 // Whether the active model accepts image input. Drives the attach-control gate.
-const activeModelSupportsImage = computed(() => {
-  const model = models.value.find((m) => m.id === selectedModelId.value);
-  return model?.supportsImageInput ?? false;
-});
+// Delegates to the pure helper in `~/utils/composerGating` (unit-tested there).
+const activeModelSupportsImage = computed(() =>
+  computeActiveModelSupportsImage(models.value, selectedModelId.value),
+);
 
 // A pending (unsent) image is incompatible with the active model — block Send
 // rather than silently stripping the image (the backend would reject it).
-const hasIncompatibleAttachment = computed(
-  () => attachments.value.length > 0 && !activeModelSupportsImage.value,
+const hasIncompatibleAttachment = computed(() =>
+  computeHasIncompatibleAttachment(attachments.value, activeModelSupportsImage.value),
 );
 
 // Message log element for auto-scroll.
@@ -492,9 +500,10 @@ const messageLogEl = ref<HTMLElement | null>(null);
 
 // Sending is allowed when authenticated, a prompt is present (text part is
 // mandatory per the backend `prompt.min(1)` invariant), and any pending
-// attachment is compatible with the active model.
-const canSend = computed(
-  () => hasGatewayCredential.value && !hasIncompatibleAttachment.value,
+// attachment is compatible with the active model. The prompt-presence guard
+// lives in `sendMessage`; `canSend` reflects only the gating state owned here.
+const canSend = computed(() =>
+  computeCanSend(hasGatewayCredential.value, hasIncompatibleAttachment.value),
 );
 
 const stateLabel = computed(() => {
@@ -560,15 +569,9 @@ function makeId(prefix: string): string {
 }
 
 function historyMessageToEntry(message: AiChatHistoryMessage): ChatMessageEntry {
-  return {
-    id: message.messageId,
-    role: message.role,
-    content: message.content,
-    attachments: message.attachments ?? [],
-    status: message.status,
-    model: message.model,
-    requestId: message.requestId ?? undefined,
-  };
+  // Delegates to the pure helper in `~/utils/chatTimeline` (unit-tested there).
+  // The local `ChatMessageEntry` is structurally identical to `ChatTimelineEntry`.
+  return mapHistoryMessageToEntry(message) as ChatMessageEntry;
 }
 
 // ---- Models ----
