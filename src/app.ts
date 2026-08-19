@@ -213,7 +213,7 @@ export function createApp(options: CreateAppOptions) {
     ...(options.fetchFn ? { fetchFn: options.fetchFn } : {}),
   };
   void app.register(aiChatRoutes, aiChatRouteOptions);
-  void app.register(adminRoutes);
+  void app.register(adminRoutes, { config });
 
   if (config.workspace.enabled) {
     void app.register(adminWorkspacesRoutes, {

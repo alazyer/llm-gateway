@@ -31,11 +31,13 @@ import {
 } from "../db/repository.js";
 import type { ModelRow, ModelChainRow, ChainModelRow, GatewayConfigRow } from "../db/types.js";
 import {
+  type AppConfig,
   coerceInputModalities,
   coerceOutputModalities,
   parseInputModalities,
   parseOutputModalities,
 } from "../config.js";
+import { refreshRuntimeModels } from "../runtime-config.js";
 import { getDatabase } from "../db/index.js";
 
 // ---------------------------------------------------------------------------
@@ -317,7 +319,28 @@ function serialisePrefixes(prefixes: string[]): string {
 // Route plugin
 // ---------------------------------------------------------------------------
 
-export const adminRoutes: FastifyPluginAsync = async (app) => {
+interface AdminRoutesOptions {
+  /**
+   * The shared, mutable in-memory AppConfig (the same reference held by the
+   * responses and ai-chat route plugins). Admin write handlers call
+   * {@link refreshRuntimeModels} on it after a successful DB mutation so that
+   * `/v1/models` discovery and `resolveModel` routing reflect the edit without a
+   * server restart.
+   */
+  config: AppConfig;
+}
+
+export const adminRoutes: FastifyPluginAsync<AdminRoutesOptions> = async (app, options) => {
+  /**
+   * Rebuild the shared config's models/chains from the current DB state. Called
+   * after every successful model or chain write. Synchronous (no await between
+   * the write and the refresh within a handler), so the in-place array
+   * replacement is atomic from JS's single-threaded perspective.
+   */
+  const refresh = (): void => {
+    refreshRuntimeModels(options.config, process.env);
+  };
+
   // =======================================================================
   // Models
   // =======================================================================
@@ -396,6 +419,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     };
 
     insertModel(row);
+    refresh();
     const created = getModelByName(body.name)!;
     return reply.code(201).send({ model: modelRowToDetail(created) });
   });
@@ -446,6 +470,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (statusChanged) {
       recalculateAffectedChains(name);
     }
+    refresh();
     const updated = getModelByName(name)!;
     return reply.send({ model: modelRowToDetail(updated) });
   });
@@ -477,6 +502,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
       // If the chain no longer exists (shouldn't happen, but defensive), skip.
     }
+    refresh();
     return reply.code(200).send({
       message: `Model '${name}' deleted successfully.`,
       affected_chains: affectedChains,
@@ -506,6 +532,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     updateModelStatus(name, "active", "Activated via admin API");
     recalculateAffectedChains(name);
+    refresh();
     const updated = getModelByName(name)!;
     return reply.send({
       model: modelRowToSummary(updated),
@@ -536,6 +563,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     updateModelStatus(name, "inactive", "Deactivated via admin API");
     recalculateAffectedChains(name);
+    refresh();
     const updated = getModelByName(name)!;
     return reply.send({
       model: modelRowToSummary(updated),
@@ -666,6 +694,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     // Recalculate the chain status based on model statuses
     recalculateChainStatus(body.name);
+    refresh();
     const created = getChainByName(body.name)!;
     const createdModels = getChainModels(body.name);
     const modelStatusByName = new Map<string, string>();
@@ -750,6 +779,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     // Recalculate chain status after membership/config change
     recalculateChainStatus(name);
+    refresh();
     const updated = getChainByName(name)!;
     const updatedModels = getChainModels(name);
     const modelStatusByName = new Map<string, string>();
@@ -778,6 +808,7 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     deleteChain(name);
+    refresh();
     return reply.code(200).send({
       message: `Chain '${name}' deleted successfully.`,
     });

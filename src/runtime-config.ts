@@ -133,12 +133,22 @@ function mapChainModels(
   });
 }
 
-export function applyDatabaseFallbackConfig(
-  baseConfig: AppConfig,
-  _sourcePresence: ConfigSourcePresence,
-  env: NodeJS.ProcessEnv = process.env,
-): AppConfig {
-  const gatewayConfig = ensureGatewayConfigRow();
+/**
+ * Rebuild the in-memory `models` and `modelChains` arrays on the shared
+ * `AppConfig` from the current database state, in place.
+ *
+ * Called at startup (via {@link applyDatabaseFallbackConfig}) and after every
+ * admin write that changes models or chains. Because every route plugin closes
+ * over the same `config` reference (see `src/app.ts`), an in-place mutation here
+ * is immediately visible to `/v1/models` discovery, `resolveModel` routing, and
+ * the ai-chat capability gate — keeping the admin view and the runtime view
+ * consistent without a restart.
+ *
+ * Gateway-level fields (timeouts, CORS, auth, default model) are intentionally
+ * NOT refreshed here; they are governed by the gateway-config singleton and are
+ * not changed by model/chain writes.
+ */
+export function refreshRuntimeModels(config: AppConfig, env: NodeJS.ProcessEnv): void {
   const models = getModelsFiltered({ source: "static" }).map((row) => mapDbModelToGatewayModel(row, env));
   const modelByName = new Map(models.map((model) => [model.name, model]));
 
@@ -165,9 +175,19 @@ export function applyDatabaseFallbackConfig(
     };
   });
 
+  config.models = models;
+  config.modelChains = modelChains;
+}
+
+export function applyDatabaseFallbackConfig(
+  baseConfig: AppConfig,
+  _sourcePresence: ConfigSourcePresence,
+  env: NodeJS.ProcessEnv = process.env,
+): AppConfig {
+  const gatewayConfig = ensureGatewayConfigRow();
+
   const config: AppConfig = {
     ...baseConfig,
-    upstreamBaseUrl: models[0]?.baseUrl ?? baseConfig.upstreamBaseUrl,
     requestTimeoutMs: gatewayConfig.request_timeout_ms,
     maxRetries: gatewayConfig.max_retries,
     maxBodySizeKb: gatewayConfig.max_body_size_kb,
@@ -181,9 +201,13 @@ export function applyDatabaseFallbackConfig(
       maxInflightPerConnection: gatewayConfig.copilot_proxy_max_inflight_per_connection,
       allowedPrefixes: JSON.parse(gatewayConfig.copilot_proxy_allowed_prefixes) as string[],
     },
-    models,
-    modelChains,
+    models: [],
+    modelChains: [],
   };
+
+  // Populate models + chains from the DB (mutates the shared object in place).
+  refreshRuntimeModels(config, env);
+  config.upstreamBaseUrl = config.models[0]?.baseUrl ?? baseConfig.upstreamBaseUrl;
 
   if (gatewayConfig.default_model !== null) {
     config.defaultModel = gatewayConfig.default_model;
