@@ -105,7 +105,7 @@ export interface AiChatHistoryMessage {
 export interface AiChatChatModel {
   id: string;
   displayName: string;
-  supportsImageInput: boolean;
+  inputModalities: string[];
 }
 
 export interface AiChatMessageListResponse {
@@ -872,8 +872,9 @@ export function useGatewayApi() {
     return response.data.map((model) => ({
       id: model.id,
       displayName: model.display_name || model.id,
-      supportsImageInput: Array.isArray(model.capabilities?.input_modalities)
-        && model.capabilities!.input_modalities!.includes("image"),
+      inputModalities: Array.isArray(model.capabilities?.input_modalities)
+        ? model.capabilities!.input_modalities!
+        : ["text"],
     }));
   }
 
@@ -952,7 +953,8 @@ export function useGatewayApi() {
         status_changed_at: number | null;
         supports_tools: boolean;
         supports_streaming: boolean;
-        supports_image_input: boolean;
+        input_modalities: string[];
+        output_modalities: string[];
       }>;
     }>("/admin/models", { params });
   }
@@ -971,7 +973,8 @@ export function useGatewayApi() {
         status_changed_at: number | null;
         supports_tools: boolean;
         supports_streaming: boolean;
-        supports_image_input: boolean;
+        input_modalities: string[];
+        output_modalities: string[];
         unknown_field_mode: string;
         unknown_field_window_requests: number;
         source: string | null;
@@ -991,7 +994,8 @@ export function useGatewayApi() {
     owned_by?: string;
     supports_tools?: boolean;
     supports_streaming?: boolean;
-    supports_image_input?: boolean;
+    input_modalities?: string[];
+    output_modalities?: string[];
     unknown_field_mode?: string;
     unknown_field_window_requests?: number;
     source?: string;
@@ -1011,7 +1015,8 @@ export function useGatewayApi() {
       owned_by?: string;
       supports_tools?: boolean;
       supports_streaming?: boolean;
-      supports_image_input?: boolean;
+      input_modalities?: string[];
+      output_modalities?: string[];
       unknown_field_mode?: string;
       unknown_field_window_requests?: number;
       status?: string;

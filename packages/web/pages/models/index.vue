@@ -124,6 +124,24 @@
             <UFormField label="Supports Streaming" name="supports_streaming" class="mt-3">
               <USwitch v-model="createForm.supports_streaming" />
             </UFormField>
+            <UFormField label="Input Modalities" name="input_modalities" class="mt-3" hint="text is always included">
+              <USelectMenu
+                v-model="createForm.input_modalities"
+                multiple
+                :items="inputModalityOptions"
+                value-key="value"
+                class="w-full"
+              />
+            </UFormField>
+            <UFormField label="Output Modalities" name="output_modalities" class="mt-3" hint="text is always included">
+              <USelectMenu
+                v-model="createForm.output_modalities"
+                multiple
+                :items="outputModalityOptions"
+                value-key="value"
+                class="w-full"
+              />
+            </UFormField>
             <div class="mt-4 flex justify-end gap-2">
               <UButton type="button" variant="ghost" @click="showCreate = false">Cancel</UButton>
               <UButton type="submit" :loading="creating">Create</UButton>
@@ -170,7 +188,21 @@ const models = ref<Array<{
   status_reason: string | null;
   supports_tools: boolean;
   supports_streaming: boolean;
+  input_modalities: string[];
+  output_modalities: string[];
 }>>([]);
+
+const inputModalityOptions = [
+  { label: "Text", value: "text" },
+  { label: "Image", value: "image" },
+  { label: "Audio", value: "audio" },
+  { label: "Video", value: "video" },
+];
+
+const outputModalityOptions = [
+  { label: "Text", value: "text" },
+  { label: "Image", value: "image" },
+];
 
 const filterStatus = ref("");
 const filterSource = ref("");
@@ -194,6 +226,8 @@ const createForm = reactive({
   owned_by: "llm-gateway",
   supports_tools: true,
   supports_streaming: true,
+  input_modalities: ["text"] as string[],
+  output_modalities: ["text"] as string[],
 });
 
 // Delete confirmation
@@ -267,6 +301,8 @@ async function onCreate() {
       owned_by: createForm.owned_by || undefined,
       supports_tools: createForm.supports_tools,
       supports_streaming: createForm.supports_streaming,
+      input_modalities: createForm.input_modalities,
+      output_modalities: createForm.output_modalities,
     });
     showCreate.value = false;
     // Reset form
@@ -277,6 +313,8 @@ async function onCreate() {
     createForm.owned_by = "llm-gateway";
     createForm.supports_tools = true;
     createForm.supports_streaming = true;
+    createForm.input_modalities = ["text"];
+    createForm.output_modalities = ["text"];
     await loadModels();
   } finally {
     creating.value = false;

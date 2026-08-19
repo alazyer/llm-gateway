@@ -27,12 +27,12 @@ import {
 const VISION_MODEL: AiChatChatModel = {
   id: "glm-5.1-vision",
   displayName: "GLM 5.1 Vision",
-  supportsImageInput: true,
+  inputModalities: ["text", "image"],
 };
 const TEXT_MODEL: AiChatChatModel = {
   id: "glm-5.1",
   displayName: "GLM 5.1",
-  supportsImageInput: false,
+  inputModalities: ["text"],
 };
 const MODELS: AiChatChatModel[] = [VISION_MODEL, TEXT_MODEL];
 

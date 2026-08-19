@@ -50,7 +50,9 @@ models:
           apiKey: "api-key-a",
           ownedBy: "zhipu",
           supportsTools: true,
-          supportsStreaming: true,
+supportsStreaming: true,
+inputModalities: ["text"],
+outputModalities: ["text"],
           unknownFieldMode: "warn",
         },
         {
@@ -60,7 +62,9 @@ models:
           apiKey: "api-key-b",
           ownedBy: "custom-provider",
           supportsTools: true,
-          supportsStreaming: true,
+supportsStreaming: true,
+inputModalities: ["text"],
+outputModalities: ["text"],
           unknownFieldMode: "warn",
         },
       ]);

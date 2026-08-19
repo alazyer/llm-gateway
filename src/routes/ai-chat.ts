@@ -941,10 +941,10 @@ export const aiChatRoutes: FastifyPluginAsync<AiChatRoutesOptions> = async (app,
     // Capability gate for image input: runs immediately after model resolution
     // and BEFORE any session or user-message insert, so a rejected image leaves
     // no DB trace except a failed-outcome audit event — mirroring the existing
-    // unroutable-model VALIDATION_ERROR. The flag is read directly off the
-    // resolved GatewayModelConfig (no extra DB lookup).
+    // unroutable-model VALIDATION_ERROR. The modalities are read directly off
+    // the resolved GatewayModelConfig (no extra DB lookup).
     const hasAttachments = parsed.attachments !== undefined && parsed.attachments.length > 0;
-    if (hasAttachments && !routedModel.model.supportsImageInput) {
+    if (hasAttachments && !routedModel.model.inputModalities.includes("image")) {
       const error = new AiChatRouteError(
         400,
         "VALIDATION_ERROR",

@@ -140,6 +140,24 @@
               <UFormField label="Supports Streaming" name="supports_streaming">
                 <USwitch v-model="editForm.supports_streaming" />
               </UFormField>
+              <UFormField label="Input Modalities" name="input_modalities" hint="text is always included">
+                <USelectMenu
+                  v-model="editForm.input_modalities"
+                  multiple
+                  :items="inputModalityOptions"
+                  value-key="value"
+                  class="w-full"
+                />
+              </UFormField>
+              <UFormField label="Output Modalities" name="output_modalities" hint="text is always included">
+                <USelectMenu
+                  v-model="editForm.output_modalities"
+                  multiple
+                  :items="outputModalityOptions"
+                  value-key="value"
+                  class="w-full"
+                />
+              </UFormField>
             </div>
 
             <UAlert
@@ -186,9 +204,23 @@ const editForm = reactive({
   owned_by: "",
   supports_tools: true,
   supports_streaming: true,
+  input_modalities: ["text"] as string[],
+  output_modalities: ["text"] as string[],
   unknown_field_mode: "warn" as string,
   unknown_field_window_requests: 100,
 });
+
+const inputModalityOptions = [
+  { label: "Text", value: "text" },
+  { label: "Image", value: "image" },
+  { label: "Audio", value: "audio" },
+  { label: "Video", value: "video" },
+];
+
+const outputModalityOptions = [
+  { label: "Text", value: "text" },
+  { label: "Image", value: "image" },
+];
 
 const statusDescription = computed(() => {
   if (!model.value) return "";
@@ -231,6 +263,12 @@ const capabilitySummary = computed(() => {
   const capabilities = [
     model.value.supports_tools ? "Tools" : null,
     model.value.supports_streaming ? "Streaming" : null,
+    Array.isArray(model.value.input_modalities) && model.value.input_modalities.length > 1
+      ? `${model.value.input_modalities.filter((m: string) => m !== "text").join("/")} in`
+      : null,
+    Array.isArray(model.value.output_modalities) && model.value.output_modalities.length > 1
+      ? `${model.value.output_modalities.filter((m: string) => m !== "text").join("/")} out`
+      : null,
   ].filter(Boolean);
   return capabilities.length ? capabilities.join(" + ") : "Basic completion";
 });
@@ -247,6 +285,8 @@ const detailFields = computed(() => {
     { key: "source", label: "Source", value: m.source ?? "—" },
     { key: "supports_tools", label: "Tools", value: m.supports_tools ? "Yes" : "No" },
     { key: "supports_streaming", label: "Streaming", value: m.supports_streaming ? "Yes" : "No" },
+    { key: "input_modalities", label: "Input Modalities", value: Array.isArray(m.input_modalities) ? m.input_modalities.join(", ") : "—" },
+    { key: "output_modalities", label: "Output Modalities", value: Array.isArray(m.output_modalities) ? m.output_modalities.join(", ") : "—" },
     { key: "unknown_field_mode", label: "Unknown Field Mode", value: m.unknown_field_mode },
     { key: "updated_at", label: "Last Updated", value: formatTimestamp(m.updated_at as number | null) },
   ];
@@ -269,6 +309,12 @@ function populateForm(source: Record<string, unknown>) {
   editForm.owned_by = String(source.owned_by ?? "");
   editForm.supports_tools = !!source.supports_tools;
   editForm.supports_streaming = !!source.supports_streaming;
+  editForm.input_modalities = Array.isArray(source.input_modalities) && source.input_modalities.length > 0
+    ? [...source.input_modalities].map(String)
+    : ["text"];
+  editForm.output_modalities = Array.isArray(source.output_modalities) && source.output_modalities.length > 0
+    ? [...source.output_modalities].map(String)
+    : ["text"];
   editForm.unknown_field_mode = String(source.unknown_field_mode ?? "warn");
   editForm.unknown_field_window_requests = Number(source.unknown_field_window_requests ?? 100);
 }

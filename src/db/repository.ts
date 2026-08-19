@@ -78,12 +78,12 @@ export function insertModel(model: ModelRow): void {
   db.prepare(
     `INSERT INTO models (
        name, upstream_model, base_url, api_key_env, owned_by, created,
-       supports_tools, supports_streaming, supports_image_input, unknown_field_mode,
+       supports_tools, supports_streaming, input_modalities, output_modalities, unknown_field_mode,
        unknown_field_window_requests, source, source_prefix, connection_id,
        status, status_reason, status_changed_at, capabilities_json, updated_at
      ) VALUES (
        ?, ?, ?, ?, ?, ?,
-       ?, ?, ?, ?,
+       ?, ?, ?, ?, ?,
        ?, ?, ?, ?,
        ?, ?, ?, ?, ?
      )`,
@@ -96,7 +96,8 @@ export function insertModel(model: ModelRow): void {
     model.created,
     model.supports_tools,
     model.supports_streaming,
-    model.supports_image_input,
+    model.input_modalities,
+    model.output_modalities,
     model.unknown_field_mode,
     model.unknown_field_window_requests,
     model.source,
@@ -208,7 +209,8 @@ export function reactivateOrInsertModel(model: ModelRow): void {
            owned_by = ?,
            supports_tools = ?,
            supports_streaming = ?,
-           supports_image_input = ?,
+           input_modalities = ?,
+           output_modalities = ?,
            unknown_field_mode = ?,
            unknown_field_window_requests = ?,
            source_prefix = ?
@@ -224,7 +226,8 @@ export function reactivateOrInsertModel(model: ModelRow): void {
       model.owned_by,
       model.supports_tools,
       model.supports_streaming,
-      model.supports_image_input,
+      model.input_modalities,
+      model.output_modalities,
       model.unknown_field_mode,
       model.unknown_field_window_requests,
       model.source_prefix,
@@ -399,7 +402,8 @@ export function updateModel(
     "created",
     "supports_tools",
     "supports_streaming",
-    "supports_image_input",
+    "input_modalities",
+    "output_modalities",
     "unknown_field_mode",
     "unknown_field_window_requests",
     "source",

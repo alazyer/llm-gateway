@@ -73,9 +73,12 @@ models:
     owned_by: anthropic-compatible
     supports_tools: true
     supports_streaming: true
-    # Whether the upstream model accepts image input. When true, the web chat
-    # composer enables image attachments and `GET /v1/models` advertises
-    # `input_modalities: ["text", "image"]`. Defaults to false (text-only).
-    supports_image_input: true
+    # Modalities the upstream model accepts as input and produces as output.
+    # `text` is always implied (every model must accept text). Adding `image`
+    # enables image attachments in the web chat composer and `GET /v1/models`
+    # advertises `input_modalities: ["text", "image"]`. Also accepts `audio`
+    # and `video` for input, and `image` for output. Defaults to ["text"].
+    input_modalities: ["text", "image"]
+    output_modalities: ["text"]
     unknown_field_mode: enforce
     unknown_field_window_requests: 100

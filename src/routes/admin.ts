@@ -30,6 +30,12 @@ import {
   getChainsFiltered,
 } from "../db/repository.js";
 import type { ModelRow, ModelChainRow, ChainModelRow, GatewayConfigRow } from "../db/types.js";
+import {
+  coerceInputModalities,
+  coerceOutputModalities,
+  parseInputModalities,
+  parseOutputModalities,
+} from "../config.js";
 import { getDatabase } from "../db/index.js";
 
 // ---------------------------------------------------------------------------
@@ -46,7 +52,8 @@ interface AdminModelSummary {
   status_changed_at: number | null;
   supports_tools: boolean;
   supports_streaming: boolean;
-  supports_image_input: boolean;
+  input_modalities: string[];
+  output_modalities: string[];
 }
 
 interface AdminModelDetail extends AdminModelSummary {
@@ -120,7 +127,8 @@ interface CreateModelBody {
   owned_by?: string;
   supports_tools?: boolean;
   supports_streaming?: boolean;
-  supports_image_input?: boolean;
+  input_modalities?: string[];
+  output_modalities?: string[];
   unknown_field_mode?: "warn" | "enforce";
   unknown_field_window_requests?: number;
   source?: string;
@@ -134,7 +142,8 @@ interface UpdateModelBody {
   owned_by?: string;
   supports_tools?: boolean;
   supports_streaming?: boolean;
-  supports_image_input?: boolean;
+  input_modalities?: string[];
+  output_modalities?: string[];
   unknown_field_mode?: "warn" | "enforce";
   unknown_field_window_requests?: number;
   source?: string;
@@ -200,7 +209,8 @@ function modelRowToSummary(row: ModelRow): AdminModelSummary {
     status_changed_at: row.status_changed_at,
     supports_tools: row.supports_tools === 1,
     supports_streaming: row.supports_streaming === 1,
-    supports_image_input: row.supports_image_input === 1,
+    input_modalities: parseInputModalities(row.input_modalities),
+    output_modalities: parseOutputModalities(row.output_modalities),
   };
 }
 
@@ -371,7 +381,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       created: now,
       supports_tools: boolToInt(body.supports_tools ?? true),
       supports_streaming: boolToInt(body.supports_streaming ?? true),
-      supports_image_input: boolToInt(body.supports_image_input ?? false),
+      input_modalities: coerceInputModalities(body.input_modalities ?? null) ?? "text",
+      output_modalities: coerceOutputModalities(body.output_modalities ?? null) ?? "text",
       unknown_field_mode: body.unknown_field_mode ?? "warn",
       unknown_field_window_requests: body.unknown_field_window_requests ?? 100,
       source: body.source ?? "static",
@@ -385,7 +396,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     };
 
     insertModel(row);
-
     const created = getModelByName(body.name)!;
     return reply.code(201).send({ model: modelRowToDetail(created) });
   });
@@ -413,7 +423,8 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (body.owned_by !== undefined) partial.owned_by = body.owned_by;
     if (body.supports_tools !== undefined) partial.supports_tools = boolToInt(body.supports_tools);
     if (body.supports_streaming !== undefined) partial.supports_streaming = boolToInt(body.supports_streaming);
-    if (body.supports_image_input !== undefined) partial.supports_image_input = boolToInt(body.supports_image_input);
+    if (body.input_modalities !== undefined) partial.input_modalities = coerceInputModalities(body.input_modalities) ?? "text";
+    if (body.output_modalities !== undefined) partial.output_modalities = coerceOutputModalities(body.output_modalities) ?? "text";
     if (body.unknown_field_mode !== undefined) partial.unknown_field_mode = body.unknown_field_mode;
     if (body.unknown_field_window_requests !== undefined) partial.unknown_field_window_requests = body.unknown_field_window_requests;
     if (body.source !== undefined) partial.source = body.source;
@@ -435,7 +446,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     if (statusChanged) {
       recalculateAffectedChains(name);
     }
-
     const updated = getModelByName(name)!;
     return reply.send({ model: modelRowToDetail(updated) });
   });
@@ -467,7 +477,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
       }
       // If the chain no longer exists (shouldn't happen, but defensive), skip.
     }
-
     return reply.code(200).send({
       message: `Model '${name}' deleted successfully.`,
       affected_chains: affectedChains,
@@ -497,7 +506,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     updateModelStatus(name, "active", "Activated via admin API");
     recalculateAffectedChains(name);
-
     const updated = getModelByName(name)!;
     return reply.send({
       model: modelRowToSummary(updated),
@@ -528,7 +536,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     updateModelStatus(name, "inactive", "Deactivated via admin API");
     recalculateAffectedChains(name);
-
     const updated = getModelByName(name)!;
     return reply.send({
       model: modelRowToSummary(updated),
@@ -659,7 +666,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     // Recalculate the chain status based on model statuses
     recalculateChainStatus(body.name);
-
     const created = getChainByName(body.name)!;
     const createdModels = getChainModels(body.name);
     const modelStatusByName = new Map<string, string>();
@@ -744,7 +750,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
 
     // Recalculate chain status after membership/config change
     recalculateChainStatus(name);
-
     const updated = getChainByName(name)!;
     const updatedModels = getChainModels(name);
     const modelStatusByName = new Map<string, string>();
@@ -773,7 +778,6 @@ export const adminRoutes: FastifyPluginAsync = async (app) => {
     }
 
     deleteChain(name);
-
     return reply.code(200).send({
       message: `Chain '${name}' deleted successfully.`,
     });

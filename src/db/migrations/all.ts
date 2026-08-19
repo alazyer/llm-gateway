@@ -5,6 +5,7 @@ import { migration002AiChat } from "./002-ai-chat.js";
 import { migration003AiChatAuditEvents } from "./003-ai-chat-audit-events.js";
 import { migration004AiChatModelTitle } from "./004-ai-chat-model-title.js";
 import { migration005ModelImageInput } from "./005-model-image-input.js";
+import { migration006ModelModalities } from "./006-model-modalities.js";
 
 /**
  * Ordered list of all known migrations.
@@ -16,4 +17,5 @@ export const allMigrations: Migration[] = [
   migration003AiChatAuditEvents,
   migration004AiChatModelTitle,
   migration005ModelImageInput,
+  migration006ModelModalities,
 ];

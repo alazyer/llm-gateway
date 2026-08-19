@@ -22,15 +22,15 @@ import type { AiChatAttachment, AiChatChatModel } from "../composables/useGatewa
 /**
  * Whether the active (selected) model accepts image input. Drives the
  * attachment-control gate. Returns `false` when no model is selected or the
- * selected id is no longer in the catalog (mirrors `model?.supportsImageInput
- * ?? false`).
+ * selected id is no longer in the catalog (mirrors
+ * `model?.inputModalities.includes("image") ?? false`).
  */
 export function activeModelSupportsImage(
   models: AiChatChatModel[],
   selectedModelId: string,
 ): boolean {
   const model = models.find((m) => m.id === selectedModelId);
-  return model?.supportsImageInput ?? false;
+  return model?.inputModalities.includes("image") ?? false;
 }
 
 /**

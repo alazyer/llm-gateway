@@ -92,7 +92,7 @@ interface ModelRecord {
   root: string;
   parent: null;
   capabilities: {
-    input_modalities: Array<"text" | "image">;
+    input_modalities: Array<"text" | "image" | "audio" | "video">;
     output_modalities: Array<"text" | "image">;
     supports_responses_api: true;
     supports_streaming: boolean;
@@ -169,6 +169,30 @@ class RouteError extends Error {
   }
 }
 
+/**
+ * Intersect a chain's per-member modality lists: a modality is advertised only
+ * when every member declares it. `text` is always present (every model accepts
+ * text). Preserves the first member's declared order for stable output.
+ */
+function intersectChainModalities<T extends string>(memberLists: readonly (readonly T[])[]): T[] {
+  if (memberLists.length === 0) {
+    return ["text" as unknown as T];
+  }
+  const first = memberLists[0]!;
+  const rest = memberLists.slice(1);
+  const result: T[] = [];
+  for (const modality of first) {
+    if (result.includes(modality)) continue;
+    if (rest.every((list) => list.includes(modality))) {
+      result.push(modality);
+    }
+  }
+  if (!result.includes("text" as unknown as T)) {
+    result.unshift("text" as unknown as T);
+  }
+  return result;
+}
+
 function createModelRecord(model: GatewayModelConfig): ModelRecord {
   const baseInstructions =
     "You are a helpful AI assistant. Follow developer and user instructions, keep responses accurate, and prefer concise plain-text output unless the caller asks for a specific format.";
@@ -183,8 +207,8 @@ function createModelRecord(model: GatewayModelConfig): ModelRecord {
     root: model.name,
     parent: null,
     capabilities: {
-      input_modalities: model.supportsImageInput ? ["text", "image"] : ["text"],
-      output_modalities: ["text"],
+      input_modalities: [...model.inputModalities],
+      output_modalities: [...model.outputModalities],
       supports_responses_api: true,
       supports_streaming: model.supportsStreaming,
       supports_system_messages: true,
@@ -224,8 +248,9 @@ function createCopilotModelRecord(model: RegisteredCopilotProxyModel): ModelReco
     root: model.id,
     parent: null,
     capabilities: {
-      // Copilot proxy registrations do not declare image input today; default
-      // to text-only until the registration capability shape grows an image flag.
+      // Copilot proxy registrations do not declare non-text modalities today;
+      // `persistRegistration` stores `input_modalities='text'` for every model.
+      // Lift this to the registration capability shape when extensions declare it.
       input_modalities: ["text"],
       output_modalities: ["text"],
       supports_responses_api: true,
@@ -264,11 +289,12 @@ function createChainModelRecord(chain: ModelChainConfig): ModelRecord {
     root: `chain-${chain.name}`,
     parent: null,
     capabilities: {
-      // A chain advertises image input only when ALL members support it — a
-      // blind fallback would silently drop an image mid-request. Stricter than
-      // the `some()` derivation used for streaming/tools on purpose.
-      input_modalities: chain.models.every((entry) => entry.modelConfig.supportsImageInput) ? ["text", "image"] : ["text"],
-      output_modalities: ["text"],
+      // A chain advertises a modality only when ALL members support it — a
+      // blind fallback would silently drop the content mid-request at whichever
+      // member can't handle it. Stricter than the `some()` derivation used for
+      // streaming/tools on purpose. `text` is always present (every model does).
+      input_modalities: intersectChainModalities(chain.models.map((entry) => entry.modelConfig.inputModalities)),
+      output_modalities: intersectChainModalities(chain.models.map((entry) => entry.modelConfig.outputModalities)),
       supports_responses_api: true,
       supports_streaming: chain.models.some((entry) => entry.modelConfig.supportsStreaming),
       supports_system_messages: true,

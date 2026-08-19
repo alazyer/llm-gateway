@@ -1,3 +1,7 @@
+import {
+  parseInputModalities,
+  parseOutputModalities,
+} from "./config.js";
 import type { AppConfig, ConfigSourcePresence, GatewayModelConfig } from "./config.js";
 import {
   getAllChains,
@@ -74,7 +78,8 @@ function mapDbModelToGatewayModel(row: ModelRow, env: NodeJS.ProcessEnv): Gatewa
     created: row.created,
     supportsTools: fromSqlBool(row.supports_tools),
     supportsStreaming: fromSqlBool(row.supports_streaming),
-    supportsImageInput: fromSqlBool(row.supports_image_input),
+    inputModalities: parseInputModalities(row.input_modalities),
+    outputModalities: parseOutputModalities(row.output_modalities),
     unknownFieldMode: row.unknown_field_mode === "enforce" ? "enforce" : "warn",
     unknownFieldWindowRequests: row.unknown_field_window_requests,
     status: row.status === "inactive" ? "inactive" : "active",
@@ -95,7 +100,8 @@ function createBrokenModelConfig(modelName: string): GatewayModelConfig {
     created: now,
     supportsTools: true,
     supportsStreaming: true,
-    supportsImageInput: false,
+    inputModalities: ["text"],
+    outputModalities: ["text"],
     unknownFieldMode: "warn",
     unknownFieldWindowRequests: 100,
     status: "inactive",

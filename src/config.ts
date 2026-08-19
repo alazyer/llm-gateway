@@ -29,7 +29,8 @@ const yamlModelSchema = z
     created: z.number().int().nonnegative().optional(),
     supports_tools: z.boolean().default(true),
     supports_streaming: z.boolean().default(true),
-    supports_image_input: z.boolean().default(false),
+    input_modalities: z.array(z.enum(["text", "image", "audio", "video"])).default(["text"]),
+    output_modalities: z.array(z.enum(["text", "image"])).default(["text"]),
     unknown_field_mode: z.enum(["warn", "enforce"]).default("warn"),
     unknown_field_window_requests: z.coerce.number().int().positive().default(100),
   })
@@ -88,6 +89,120 @@ const yamlGatewaySchema = z.object({
   model_chains: z.array(yamlModelChainSchema).optional(),
 });
 
+/**
+ * Modalities a model can accept as input or produce as output. Stored in the
+ * `models` table as a comma-joined TEXT column (e.g. `"text,image"`) and parsed
+ * back via {@link parseInputModalities} / {@link parseOutputModalities}.
+ *
+ * `text` is always present in a well-formed record — helpers guarantee it.
+ */
+export type InputModality = "text" | "image" | "audio" | "video";
+export type OutputModality = "text" | "image";
+
+const INPUT_MODALITY_VALUES: readonly InputModality[] = ["text", "image", "audio", "video"];
+const OUTPUT_MODALITY_VALUES: readonly OutputModality[] = ["text", "image"];
+
+/**
+ * Parse a comma-joined modality string (as stored in the DB) into a validated
+ * `InputModality[]`. Unknown entries are dropped. `text` is always present in
+ * the result — a model must accept text input.
+ */
+export function parseInputModalities(raw: string | null | undefined): InputModality[] {
+  return parseModalities(raw, INPUT_MODALITY_VALUES);
+}
+
+/**
+ * Parse a comma-joined modality string into a validated `OutputModality[]`.
+ * `text` is always present in the result.
+ */
+export function parseOutputModalities(raw: string | null | undefined): OutputModality[] {
+  return parseModalities(raw, OUTPUT_MODALITY_VALUES);
+}
+
+function parseModalities<T extends string>(
+  raw: string | null | undefined,
+  allowed: readonly T[],
+): T[] {
+  const text = firstModality(allowed);
+  if (!raw) {
+    return [text];
+  }
+  const seen = new Set<T>();
+  for (const token of raw.split(",")) {
+    const value = token.trim() as T;
+    if (allowed.includes(value) && !seen.has(value)) {
+      seen.add(value);
+    }
+  }
+  if (!seen.has(text)) {
+    seen.add(text);
+  }
+  // Preserve declared order but keep `text` first for stable serialization.
+  const ordered = allowed.filter((value) => seen.has(value));
+  return ordered.length > 0 ? ordered : [text];
+}
+
+/** Join a modality array into the comma-joined TEXT form stored in the DB. */
+export function joinModalities(modalities: readonly string[]): string {
+  return modalities.join(",");
+}
+
+/**
+ * Coerce a request-body modality value (array from JSON) into the
+ * comma-joined TEXT form stored in the DB, dropping unknown tokens and
+ * guaranteeing `text` is present. Returns `null` when `declared` is `null`
+ * so callers can distinguish "unset" from "explicitly text-only".
+ */
+export function coerceInputModalities(declared: readonly string[] | null): string | null {
+  return coerceModalities(declared, INPUT_MODALITY_VALUES);
+}
+
+export function coerceOutputModalities(declared: readonly string[] | null): string | null {
+  return coerceModalities(declared, OUTPUT_MODALITY_VALUES);
+}
+
+function coerceModalities<T extends string>(
+  declared: readonly T[] | null,
+  allowed: readonly T[],
+): string | null {
+  if (declared === null) {
+    return null;
+  }
+  return joinModalities(normalizeModalities(declared, allowed));
+}
+
+/**
+ * Normalize a declared modality list (from YAML or admin request body) into a
+ * deduplicated, ordered array with `text` guaranteed present. Mirrors the
+ * guarantees of {@link parseInputModalities} / {@link parseOutputModalities}
+ * but works on already-validated arrays.
+ */
+function normalizeModalities<T extends string>(
+  declared: readonly T[],
+  allowed: readonly T[],
+): T[] {
+  const text = firstModality(allowed);
+  const seen = new Set<T>();
+  for (const value of declared) {
+    if (allowed.includes(value) && !seen.has(value)) {
+      seen.add(value);
+    }
+  }
+  if (!seen.has(text)) {
+    seen.add(text);
+  }
+  return allowed.filter((value) => seen.has(value));
+}
+
+/** The first element of a non-empty allowed-modality list (`text`). */
+function firstModality<T>(allowed: readonly T[]): T {
+  const first = allowed[0];
+  if (first === undefined) {
+    throw new Error("modality allowed list must be non-empty");
+  }
+  return first;
+}
+
 export interface GatewayModelConfig {
   name: string;
   upstreamModel: string;
@@ -98,7 +213,8 @@ export interface GatewayModelConfig {
   created: number;
   supportsTools: boolean;
   supportsStreaming: boolean;
-  supportsImageInput: boolean;
+  inputModalities: InputModality[];
+  outputModalities: OutputModality[];
   unknownFieldMode: "warn" | "enforce";
   unknownFieldWindowRequests: number;
   status: "active" | "inactive";
@@ -189,7 +305,8 @@ function normalizeModelEntry(
     created: value.created ?? getCurrentTimestamp(),
     supportsTools: value.supports_tools,
     supportsStreaming: value.supports_streaming,
-    supportsImageInput: value.supports_image_input,
+    inputModalities: normalizeModalities(value.input_modalities, INPUT_MODALITY_VALUES),
+    outputModalities: normalizeModalities(value.output_modalities, OUTPUT_MODALITY_VALUES),
     unknownFieldMode: value.unknown_field_mode,
     unknownFieldWindowRequests: value.unknown_field_window_requests,
     status: "active",
